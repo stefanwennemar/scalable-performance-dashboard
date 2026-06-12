@@ -1,0 +1,19 @@
+[project]
+name = "scalableperformancedashboard"
+version = "0.1.0"
+description = "Interactive performance dashboard for Scalable Capital Broker accounts"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "dash>=2.18",
+    "plotly>=5.24",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "requests>=2.32",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.3",
+    "playwright>=1.49",
+    "yfinance>=0.2.50",
+    "scipy>=1.14",
+    "python-dateutil>=2.9",
+    "pandas-stubs~=3.0.3",
+]

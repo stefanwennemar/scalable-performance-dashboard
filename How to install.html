@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anleitung — Scalable Performance Dashboard</title>
+<style>
+    :root {
+        --bg: #0d0d10;
+        --card: #16181d;
+        --card-2: #1d1f25;
+        --border: #25282f;
+        --text: #f4f4f6;
+        --muted: #9aa0aa;
+        --tertiary: #6b7280;
+        --emerald: #28EBCF;
+        --emerald-dim: rgba(40, 235, 207, 0.18);
+        --red: #ff5560;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+        margin: 0; padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, 'Inter',
+                     'Segoe UI', Helvetica, Arial, sans-serif;
+        font-size: 15px;
+        line-height: 1.55;
+        -webkit-font-smoothing: antialiased;
+    }
+    .shell {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 48px 28px 96px;
+    }
+    h1 {
+        font-size: 28px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 0 0 6px;
+    }
+    .lede {
+        color: var(--muted);
+        margin: 0 0 36px;
+    }
+    h2 {
+        font-size: 16px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        font-weight: 600;
+        margin: 32px 0 12px;
+    }
+    .step {
+        display: flex;
+        gap: 20px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 22px 24px;
+        margin-bottom: 14px;
+    }
+    .step .num {
+        flex: 0 0 36px;
+        height: 36px; width: 36px;
+        border-radius: 10px;
+        background: var(--emerald-dim);
+        color: var(--emerald);
+        font-weight: 700;
+        font-size: 18px;
+        display: flex; align-items: center; justify-content: center;
+    }
+    .step .body { flex: 1; }
+    .step h3 {
+        margin: 0 0 6px;
+        font-size: 17px;
+        font-weight: 600;
+    }
+    .step p {
+        margin: 6px 0;
+        color: var(--text);
+    }
+    .muted, .step .hint {
+        color: var(--muted);
+        font-size: 13px;
+    }
+    .step ul, .step ol { margin: 8px 0 0; padding-left: 18px; color: var(--muted); }
+    .step ul li, .step ol li { margin: 4px 0; color: var(--text); }
+    code, .file {
+        background: var(--card-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 2px 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13.5px;
+        color: var(--emerald);
+        word-break: break-all;
+    }
+    pre {
+        background: var(--card-2);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+        margin: 12px 0;
+        overflow-x: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        color: var(--text);
+        white-space: pre-wrap;
+        word-break: break-all;
+        position: relative;
+    }
+    .tabs {
+        display: flex;
+        gap: 6px;
+        margin: 10px 0 0;
+    }
+    .tab {
+        background: var(--card-2);
+        color: var(--muted);
+        border: 1px solid var(--border);
+        padding: 6px 14px;
+        font-size: 13px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-family: inherit;
+        transition: color 150ms, background 150ms;
+    }
+    .tab.active {
+        background: var(--emerald);
+        color: #0a0a0a;
+        border-color: transparent;
+        font-weight: 600;
+    }
+    .tab:not(.active):hover { color: var(--text); }
+    .platform-block { display: none; }
+    .platform-block.active { display: block; }
+    .callout {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--emerald);
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin: 18px 0;
+        color: var(--text);
+    }
+    .callout.warn { border-left-color: var(--red); }
+    .callout strong { color: var(--emerald); }
+    .callout.warn strong { color: var(--red); }
+    a { color: var(--emerald); text-decoration: none; border-bottom: 1px dotted var(--emerald-dim); }
+    a:hover { border-bottom-color: var(--emerald); }
+    hr { border: none; height: 1px; background: var(--border); margin: 32px 0; }
+    .footer-note {
+        font-size: 12.5px;
+        color: var(--tertiary);
+        text-align: center;
+        margin-top: 60px;
+    }
+    .copy-row {
+        position: relative;
+    }
+    .copy-btn {
+        position: absolute; top: 8px; right: 8px;
+        background: rgba(40, 235, 207, 0.08);
+        color: var(--emerald);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 3px 10px;
+        font-size: 11.5px;
+        cursor: pointer;
+        font-family: inherit;
+        transition: background 120ms;
+    }
+    .copy-btn:hover { background: rgba(40, 235, 207, 0.16); }
+    .copy-btn.copied { color: #0a0a0a; background: var(--emerald); border-color: transparent; }
+</style>
+</head>
+<body>
+<div class="shell">
+
+<h1>Willkommen — los geht's mit deinem Dashboard.</h1>
+<p class="lede">
+    Ein paar kleine Schritte. Beim ersten Mal ungefähr zehn Minuten,
+    größtenteils Warten. Danach reicht ein Doppelklick auf
+    <span class="file">Run Dashboard</span>, um dein Portfolio im Browser
+    zu sehen.
+</p>
+
+<h2>Vorbereitung — CSV aus der Scalable-App exportieren</h2>
+
+<div class="step">
+    <div class="num">A</div>
+    <div class="body">
+        <h3>Scalable-Capital-App auf deinem Handy öffnen</h3>
+        <ol>
+            <li>Gehe zu <strong>Transaktionen</strong>.</li>
+            <li>Tippe oben rechts auf den
+                <strong>Drei-Punkte-Button (⋯)</strong>.</li>
+            <li>Tippe auf <strong>Alle auswählen</strong>.</li>
+            <li>Tippe auf den <strong>Teilen-Button</strong> und wähle
+                <strong>Transaktionen CSV</strong>.</li>
+            <li>Speichere die Datei und übertrage sie auf deinen Computer
+                (siehe unten).</li>
+        </ol>
+    </div>
+</div>
+
+<div class="step">
+    <div class="num">B</div>
+    <div class="body">
+        <h3>Datei auf den Computer bringen</h3>
+        <p class="hint" style="margin-top: 0;">
+            Nimm einfach den Weg, der für deine Handy-/Computer-Kombination
+            am einfachsten ist.
+        </p>
+
+        <p style="margin-top: 12px;"><strong>iPhone → Mac</strong> &nbsp;
+            <span class="muted">(am einfachsten)</span></p>
+        <ul>
+            <li><strong>AirDrop:</strong> Aus dem iOS-Teilen-Menü AirDrop
+                und deinen Mac auswählen. Die CSV landet im
+                <span class="file">Downloads</span>-Ordner.</li>
+        </ul>
+
+        <p style="margin-top: 14px;"><strong>iPhone → Windows</strong></p>
+        <ul>
+            <li><strong>E-Mail an dich selbst:</strong> Aus dem Teilen-Menü
+                "Mail" wählen, an deine eigene Adresse schicken, am PC
+                den Anhang herunterladen. Klappt immer.</li>
+            <li><strong>iCloud Drive:</strong> Auf dem iPhone in
+                <em>Dateien → iCloud Drive</em> speichern. Auf dem PC
+                einmal <em>iCloud für Windows</em> installieren, dann
+                taucht die Datei im Datei-Explorer auf.</li>
+        </ul>
+
+        <p style="margin-top: 14px;"><strong>Android → Mac oder Windows</strong></p>
+        <ul>
+            <li><strong>Google Drive</strong> (oder eine andere Cloud):
+                Aus dem Teilen-Menü hochladen, am Computer
+                herunterladen.</li>
+            <li><strong>E-Mail an dich selbst:</strong> Selbe Idee wie
+                oben.</li>
+        </ul>
+
+        <div class="callout">
+            <strong>Wohin mit der Datei:</strong> Lege sie in den Ordner
+            <span class="file">transaction_data</span> direkt neben
+            dieser Anleitung. Das Dashboard nimmt automatisch immer die
+            neueste CSV aus diesem Ordner — alte Exporte kannst du also
+            ruhig liegen lassen.
+        </div>
+    </div>
+</div>
+
+<h2>Wähle dein Betriebssystem</h2>
+<div class="tabs">
+    <button class="tab active" data-os="mac">macOS</button>
+    <button class="tab" data-os="win">Windows</button>
+</div>
+
+<!-- ============================================================ -->
+<!-- macOS ====================================================== -->
+<!-- ============================================================ -->
+<div class="platform-block active" data-os="mac">
+
+<div class="step">
+    <div class="num">1</div>
+    <div class="body">
+        <h3><code>uv</code> installieren (einmalig, ~30 Sekunden)</h3>
+        <p>
+            <code>uv</code> ist ein kleines Tool, das Python und die
+            Bibliotheken für das Dashboard für dich installiert. Öffne
+            das <strong>Terminal</strong> (drücke
+            <span class="file">⌘ + Leertaste</span>, tippe
+            <em>Terminal</em> und drücke Enter), füge dann diese eine
+            Zeile ein und drücke nochmal Enter:
+        </p>
+        <div class="copy-row">
+            <pre id="mac-uv">curl -LsSf https://astral.sh/uv/install.sh | sh</pre>
+            <button class="copy-btn" data-target="mac-uv">Kopieren</button>
+        </div>
+        <p class="hint">
+            Du siehst etwas Download-Fortschritt und am Ende eine Zeile
+            wie "uv is installed". Danach kannst du das Terminal-Fenster
+            schließen.
+        </p>
+    </div>
+</div>
+
+<div class="step">
+    <div class="num">2</div>
+    <div class="body">
+        <h3>Setup ausführen</h3>
+        <p>
+            Doppelklick im Finder auf die Datei
+            <span class="file">Setup.command</span> in diesem Ordner.
+        </p>
+        <p>
+            Ein Terminal-Fenster öffnet sich und führt drei Schritte aus.
+            Der erste Lauf dauert ungefähr drei Minuten — Python und die
+            Bibliotheken werden geladen. Wenn
+            <strong>"Setup complete!"</strong> erscheint, eine beliebige
+            Taste drücken, fertig.
+        </p>
+        <div class="callout warn">
+            <strong>Wenn macOS sich weigert</strong> (zum Beispiel
+            "kann nicht geöffnet werden"): Rechtsklick auf
+            <span class="file">Setup.command</span>,
+            <em>Öffnen</em> wählen, im Dialog nochmal <em>Öffnen</em>
+            klicken. Beim zweiten Mal funktioniert dann der ganz normale
+            Doppelklick.
+        </div>
+    </div>
+</div>
+
+<div class="step">
+    <div class="num">3</div>
+    <div class="body">
+        <h3>CSV hineinlegen und Dashboard starten</h3>
+        <p>
+            Lege die exportierte CSV (siehe oben) in den Ordner
+            <span class="file">transaction_data</span> (direkt neben
+            dieser Anleitung).
+        </p>
+        <p>
+            Dann Doppelklick auf
+            <span class="file">Run Dashboard.command</span>. Dein Browser
+            öffnet sich automatisch unter
+            <a href="http://127.0.0.1:8050">http://127.0.0.1:8050</a>,
+            sobald das Dashboard bereit ist.
+        </p>
+        <ul>
+            <li>Erster Start: 5–7 Minuten (Live-Preise werden geladen).</li>
+            <li>Folgende Starts: in der Regel unter einer Minute.</li>
+            <li>Zum Beenden einfach das Terminal-Fenster schließen.</li>
+        </ul>
+    </div>
+</div>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- Windows ==================================================== -->
+<!-- ============================================================ -->
+<div class="platform-block" data-os="win">
+
+<div class="step">
+    <div class="num">1</div>
+    <div class="body">
+        <h3><code>uv</code> installieren (einmalig, ~30 Sekunden)</h3>
+        <p>
+            <code>uv</code> ist ein kleines Tool, das Python und die
+            Bibliotheken für das Dashboard für dich installiert. Öffne
+            <strong>PowerShell</strong> (Windows-Taste drücken,
+            <em>PowerShell</em> tippen, Enter), füge dann diese eine
+            Zeile ein und drücke nochmal Enter:
+        </p>
+        <div class="copy-row">
+            <pre id="win-uv">powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"</pre>
+            <button class="copy-btn" data-target="win-uv">Kopieren</button>
+        </div>
+        <p class="hint">
+            Du siehst etwas Download-Fortschritt und am Ende eine Zeile
+            wie "uv is installed". Danach kannst du das PowerShell-Fenster
+            schließen.
+        </p>
+    </div>
+</div>
+
+<div class="step">
+    <div class="num">2</div>
+    <div class="body">
+        <h3>Setup ausführen</h3>
+        <p>
+            Doppelklick im Explorer auf die Datei
+            <span class="file">Setup.bat</span> in diesem Ordner.
+        </p>
+        <p>
+            Ein Eingabeaufforderungs-Fenster öffnet sich und führt drei
+            Schritte aus. Der erste Lauf dauert ungefähr drei Minuten —
+            Python und die Bibliotheken werden geladen. Wenn
+            <strong>"Setup complete!"</strong> erscheint, eine beliebige
+            Taste drücken, fertig.
+        </p>
+        <div class="callout warn">
+            <strong>Wenn Windows die Datei blockiert</strong> (SmartScreen
+            mit "Windows hat Ihren PC geschützt"): auf
+            <em>Weitere Informationen</em> klicken und dann
+            <em>Trotzdem ausführen</em>. Das passiert nur beim ersten Mal.
+        </div>
+    </div>
+</div>
+
+<div class="step">
+    <div class="num">3</div>
+    <div class="body">
+        <h3>CSV hineinlegen und Dashboard starten</h3>
+        <p>
+            Lege die exportierte CSV (siehe oben) in den Ordner
+            <span class="file">transaction_data</span> (direkt neben
+            dieser Anleitung).
+        </p>
+        <p>
+            Dann Doppelklick auf
+            <span class="file">Run Dashboard.bat</span>. Dein Browser
+            öffnet sich automatisch unter
+            <a href="http://127.0.0.1:8050">http://127.0.0.1:8050</a>,
+            sobald das Dashboard bereit ist.
+        </p>
+        <ul>
+            <li>Erster Start: 5–7 Minuten (Live-Preise werden geladen).</li>
+            <li>Folgende Starts: in der Regel unter einer Minute.</li>
+            <li>Zum Beenden einfach das Eingabeaufforderungs-Fenster
+                schließen.</li>
+        </ul>
+    </div>
+</div>
+
+</div>
+
+<hr>
+
+<h2>Was passiert da eigentlich?</h2>
+<p class="muted">
+    Deine CSV bleibt auf deinem Computer. Das Dashboard läuft als kleiner
+    lokaler Webserver — die Adresse ist <code>127.0.0.1</code>, also
+    erreichbar ausschließlich von deinem eigenen Rechner. Live-Preise
+    kommen von <a href="https://www.gettex.de">gettex.de</a>; historische
+    Kurse für deine Positionen und für den MSCI-ACWI-Benchmark holt das
+    Dashboard von der gleichen Quelle. Es wird nichts hochgeladen.
+</p>
+
+<h2>Daten aktualisieren</h2>
+<p class="muted">
+    Wenn du gehandelt hast, exportiere eine neue CSV (siehe oben) und
+    lege sie in den
+    <span class="file">transaction_data</span>-Ordner. Das Dashboard
+    nimmt automatisch die neueste Datei. Danach Doppelklick auf
+    <span class="file">Run Dashboard</span>.
+</p>
+
+<h2>Wenn etwas nicht klappt</h2>
+<ul class="muted">
+    <li><strong>Browser sagt "Verbindung nicht möglich"</strong> beim
+        allerersten Start: einfach das Launcher-Fenster offen lassen und
+        warten — der erste Lauf lädt rund 200 MB Kursdaten. Der Browser
+        aktualisiert sich von selbst, sobald der Server bereit ist.</li>
+    <li><strong>Zahlen sehen seltsam aus</strong>: die Live-Preise sind
+        evtl. veraltet. Oben rechts im Dashboard auf
+        <em>Refresh prices</em> klicken.</li>
+    <li><strong>Neuer Laptop</strong>: kompletten Ordner kopieren und
+        Setup auf der neuen Maschine erneut ausführen.</li>
+</ul>
+
+<p class="footer-note">
+    Gebaut mit Python, Dash, Plotly, gettex.de und yfinance.
+    Kein Tracking, keine Telemetrie, kein Internet nötig nach der
+    Einrichtung (außer für das Aktualisieren der Live-Preise).
+</p>
+</div>
+
+<script>
+    document.querySelectorAll('.tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const os = tab.dataset.os;
+            document.querySelectorAll('.tab').forEach(t =>
+                t.classList.toggle('active', t.dataset.os === os));
+            document.querySelectorAll('.platform-block').forEach(b =>
+                b.classList.toggle('active', b.dataset.os === os));
+            try { localStorage.setItem('installer-os', os); } catch (e) {}
+        });
+    });
+    try {
+        let preferred = localStorage.getItem('installer-os');
+        if (!preferred) {
+            preferred = /Windows|Win64/.test(navigator.userAgent) ? 'win' : 'mac';
+        }
+        document.querySelector(`.tab[data-os="${preferred}"]`)?.click();
+    } catch (e) {}
+
+    document.querySelectorAll('.copy-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const target = document.getElementById(btn.dataset.target);
+            if (!target) return;
+            try {
+                await navigator.clipboard.writeText(target.textContent.trim());
+                btn.textContent = 'Kopiert!';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    btn.textContent = 'Kopieren';
+                    btn.classList.remove('copied');
+                }, 1400);
+            } catch (e) {
+                btn.textContent = 'Bitte ⌘C drücken';
+                setTimeout(() => { btn.textContent = 'Kopieren'; }, 1400);
+            }
+        });
+    });
+</script>
+</body>
+</html>
