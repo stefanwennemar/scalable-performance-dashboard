@@ -346,8 +346,13 @@ def refresh_prices(n_clicks, n_intervals):
     except Exception as e:
         return f"Price refresh error: {e!s}"
     ok = sum(1 for lp in prices.values() if lp.mid is not None)
+    # Show Berlin time so the "updated at" is meaningful even when the user
+    # runs the dashboard from a non-CET machine. Includes the offset
+    # suffix (CET / CEST) so DST is unambiguous.
+    from .performance import BERLIN_TZ
+    now_berlin = datetime.now(BERLIN_TZ)
     return (f"Live prices: {ok}/{len(prices)} fresh · "
-            f"updated {datetime.now().strftime('%H:%M:%S')}")
+            f"updated {now_berlin.strftime('%H:%M:%S %Z')}")
 
 
 # ---------------------------------------------------------------------------
@@ -380,18 +385,30 @@ def render_kpis(_status, period):
     state = ds.load_state()
 
     # "Portfolio value" uses live gettex mid where available — most accurate
-    # snapshot of *now*. The historical panel uses Yahoo, so we don't show
-    # today's gettex value via panel.iloc[-1] to avoid Yahoo-vs-gettex
-    # mismatch showing up as fake intraday moves.
+    # snapshot of *now*. The panel stores gettex EOD closes (with yfinance
+    # fallback for ISINs gettex doesn't list) — both sources line up well
+    # enough that we can use the live mid for today and the panel close
+    # for yesterday without the source-mismatch noise we used to see.
     today_val = ds.current_value()
 
-    # Today's change uses panel-consistent prices (yesterday vs today) and
-    # nets out any external cash flow that happened today, so a withdrawal
-    # doesn't look like a portfolio loss.
-    today_val_panel = float(panel.value.iloc[-1])
-    today_yest = float(panel.value.iloc[-2]) if len(panel.value) > 1 else today_val_panel
+    # gettex quotes most stocks/ETFs until ~22-23h CET (well past Xetra's
+    # 17:30 close), so the live mid is real-time during any reasonable
+    # checking hour. We still prefer the panel-based delta when gettex's
+    # /timeseries/historical has returned something for today, because
+    # that's what the Scalable app tends to show. When the panel is
+    # forward-filled from yesterday — i.e. gettex hasn't yet returned a
+    # today-row — we fall back to (live total) − (yesterday's close).
+    panel_today = float(panel.value.iloc[-1])
+    today_yest = float(panel.value.iloc[-2]) if len(panel.value) > 1 else today_val
     today_flow = float(panel.external_flow.iloc[-1])
-    todays_change = today_val_panel - today_yest - today_flow
+    panel_change = panel_today - today_yest - today_flow
+    live_change = today_val - today_yest - today_flow
+    # Floating-point dust threshold (€1) — if the panel-based change is
+    # tinier than that, the panel is forward-filled and live wins.
+    if abs(panel_change) >= 1.0:
+        todays_change = panel_change
+    else:
+        todays_change = live_change
     todays_change_pct = (todays_change / today_yest) if today_yest else 0.0
 
     sub_val, sub_flow = _window_slice(panel, period)

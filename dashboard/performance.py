@@ -23,21 +23,20 @@ from scipy.optimize import brentq
 
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
-XETRA_OPEN_HOUR = 9   # main German exchange opens 09:00 Europe/Berlin
 
 
 def effective_today() -> pd.Timestamp:
-    """The most recent calendar date for which the German market has opened.
+    """Today's calendar date in Europe/Berlin.
 
-    Before 09:00 Europe/Berlin we still report yesterday's date as "today",
-    so the dashboard doesn't show a value for a date the exchange hasn't
-    started trading yet (and also doesn't roll over prematurely when the
-    user is in a US time zone whose evening = European tomorrow).
+    All displayed dates follow Berlin's calendar — so the moment Berlin
+    rolls past midnight, the dashboard considers the new day as "today",
+    no matter what time zone the dashboard is being run from. This is
+    important e.g. for a user in PDT checking at 23:30 local (= 08:30
+    Berlin next day): the dashboard will already show the new Berlin date
+    even though Xetra hasn't opened yet. Numbers will then update as
+    gettex starts publishing the new day's quotes.
     """
-    berlin_now = datetime.now(BERLIN_TZ)
-    if berlin_now.hour < XETRA_OPEN_HOUR:
-        return pd.Timestamp((berlin_now - timedelta(days=1)).date())
-    return pd.Timestamp(berlin_now.date())
+    return pd.Timestamp(datetime.now(BERLIN_TZ).date())
 
 EXTERNAL_CASH_TYPES = {
     "Deposit", "Withdrawal", "Cash Transfer In", "Cash Transfer Out",

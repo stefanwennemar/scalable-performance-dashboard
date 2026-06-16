@@ -36,6 +36,53 @@ GETTEX_BASE = "https://www.gettex.de"
 
 _BID_ASK_RE = re.compile(r"^\s*([\d.,]+)\s*\|\s*([\d.,]+)\s*\|")
 
+# German certificates / Turbos / Optionsscheine have ISINs starting with
+# DE000 + an issuer letter (G = Goldman Sachs, H = HSBC, V = Vontobel,
+# X = Citi, etc). For those we know the right page slug a priori, so we
+# bias the slug probe order to start with ``zertifikat``.
+_CERT_ISSUER_LETTERS = set("GHVXSCB")
+
+# Names that come back when gettex serves a "wrong" or default page —
+# treating them as a successful scrape would poison the slug cache, which
+# is exactly the bug that left Apple cached as ``zertifikat``.
+_SUSPICIOUS_NAME_TOKENS = (
+    "gettex", "willkommen", "fehler", "error", "{name}", "{wkn}",
+)
+
+
+def slug_hints_from_isins(isins: Iterable[str]) -> dict[str, str]:
+    """Best-effort a-priori slug hint based on ISIN prefix conventions.
+
+    The cached slug (if any) still takes precedence inside ``_fetch_one``;
+    this is the hint we use the *first* time we see an ISIN.
+    """
+    hints: dict[str, str] = {}
+    for isin in isins:
+        if (len(isin) >= 6 and isin[:5] == "DE000"
+                and isin[5] in _CERT_ISSUER_LETTERS):
+            hints[isin] = "zertifikat"
+    return hints
+
+
+def _name_looks_real(name: str | None, isin: str) -> bool:
+    """Sanity check on the security name parsed out of the page title.
+
+    We've seen gettex occasionally serve a generic page whose title still
+    has the BID|ASK shape (because of a fallback widget), making the
+    scraper think it succeeded. The cure: reject anything where the name
+    field is empty, suspiciously short, or contains one of the markers
+    that show up on the homepage / error pages.
+    """
+    if not name:
+        return False
+    n = name.strip().lower()
+    if len(n) < 3:
+        return False
+    for tok in _SUSPICIOUS_NAME_TOKENS:
+        if tok in n:
+            return False
+    return True
+
 
 @dataclass
 class LivePrice:
@@ -134,6 +181,12 @@ async def _fetch_one(context, isin: str, preferred_slug: str | None,
             title = await page.title()
             bid, ask, name, wkn = _parse_title(title)
             if bid is None and ask is None:
+                continue
+            # Guard against gettex serving a default / error page that
+            # happens to satisfy the BID|ASK regex. If the name doesn't
+            # look like a real security name, treat as a miss and keep
+            # iterating slugs.
+            if not _name_looks_real(name, isin):
                 continue
             if bid is not None and ask is not None:
                 mid = (bid + ask) / 2

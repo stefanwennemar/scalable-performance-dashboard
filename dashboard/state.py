@@ -21,6 +21,7 @@ from .performance import build_value_panel, effective_today, ValuePanel
 from .portfolio import (build_portfolio, positions_to_dataframe,
                         realized_to_dataframe, PortfolioState)
 from .prices import (fetch_live_prices, get_slug_hints_from_cache,
+                     slug_hints_from_isins,
                      LivePrice, CACHE_TTL_SECONDS)
 
 
@@ -77,7 +78,11 @@ def refresh_live_prices(force: bool = False) -> dict[str, LivePrice]:
                 (time.time() - st.live_prices_at) < CACHE_TTL_SECONDS):
             return st.live_prices
         isins = list(st.portfolio.positions.keys())
-        hints = get_slug_hints_from_cache(isins)
+        # Two layers of hints: ISIN-prefix a-priori guess (certificates →
+        # ``zertifikat``), overridden by any cached slug that's previously
+        # been confirmed by a successful scrape.
+        hints = slug_hints_from_isins(isins)
+        hints.update(get_slug_hints_from_cache(isins))
         prices = fetch_live_prices(isins, slug_hints=hints,
                                    force_refresh=force, concurrency=6)
         st.live_prices = prices
@@ -144,12 +149,28 @@ def get_benchmark_series(force: bool = False) -> pd.Series:
 
 
 def current_value() -> float:
-    """Best estimate of today's portfolio value using live prices + cash."""
+    """Best estimate of today's portfolio value using live prices + cash.
+
+    Uses the same fallback chain the positions table uses so that the
+    "Portfolio value" KPI matches the sum of per-position values:
+      live gettex mid → panel's today close (forward-filled if needed) →
+      lot avg cost. The avg-cost fallback only kicks in for positions that
+      have neither a live quote nor any historical price (very rare).
+    """
     st = load_state()
     refresh_live_prices()
+    panel = get_value_panel()
+    today = panel.dates[-1]
+    px = panel.prices
     total = st.portfolio.cash_balance
     for isin, pos in st.portfolio.positions.items():
         lp = st.live_prices.get(isin)
-        mid = lp.mid if (lp and lp.mid is not None) else pos.avg_cost
+        mid = lp.mid if (lp and lp.mid is not None) else None
+        if mid is None and isin in px.columns:
+            today_px = float(px.loc[today, isin])
+            if today_px == today_px:    # not NaN
+                mid = today_px
+        if mid is None:
+            mid = pos.avg_cost
         total += pos.shares * mid
     return total
