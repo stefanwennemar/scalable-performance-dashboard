@@ -7,7 +7,6 @@ and an MSCI ACWI benchmark overlay — without sending your data anywhere.
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-emerald.svg)](LICENSE)
-[![Built with Dash](https://img.shields.io/badge/built%20with-Dash-1.7+-success)](https://dash.plotly.com)
 
 > **Privacy**: nothing is uploaded. The dashboard reads your CSV locally
 > and serves the UI on `127.0.0.1` only. Live prices come from
@@ -154,23 +153,6 @@ deps, you'll only see well-known libraries (Dash, Plotly, pandas,
 yfinance, Playwright).
 
 ---
-
-## Roadmap / nice-to-haves
-
-- [ ] Optional FastAPI/Docker wrapper for hosted use
-- [ ] User-pickable benchmark (currently hard-coded to IUSQ / MSCI ACWI)
-- [ ] Compare two CSV exports side by side (deltas since last load)
-- [ ] Export the metric grid to PDF
-
----
-
-## Acknowledgements
-
-Built with [Dash](https://dash.plotly.com), [Plotly](https://plotly.com/python/),
-[pandas](https://pandas.pydata.org), [Playwright](https://playwright.dev/python/),
-[yfinance](https://github.com/ranaroussi/yfinance) and the public
-[gettex.de](https://www.gettex.de) widget. Visual palette inspired by
-Scalable Capital's brand.
 
 ## License
 
