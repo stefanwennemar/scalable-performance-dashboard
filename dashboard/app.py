@@ -27,6 +27,19 @@ COLOR_RED_FILL = "rgba(255, 85, 96, 0.14)"
 COLOR_GREY = "#9aa0aa"
 COLOR_LINE = "#28EBCF"
 
+# Single source of truth for plotly font / hover styling — used by every
+# chart on the dashboard so typography stays consistent with the rest of
+# the UI.
+_CHART_FONT = dict(
+    family=("Inter, -apple-system, BlinkMacSystemFont, 'Helvetica Neue', "
+            "Arial, sans-serif"),
+    color="#9aa0aa", size=12,
+)
+_HOVER_LABEL = dict(
+    bgcolor="#16181d", bordercolor="#25282f",
+    font=dict(family=_CHART_FONT["family"], size=12, color="#f4f4f6"),
+)
+
 # ---------------------------------------------------------------------------
 # Initial data load (runs on import so Dash starts in a known state).
 # ---------------------------------------------------------------------------
@@ -154,6 +167,132 @@ def overview_tab() -> html.Div:
     ])
 
 
+def returns_tab() -> html.Div:
+    return html.Div([
+        html.Div([
+            html.H3("Return analytics", className="card-title"),
+            html.P("Period-by-period returns at daily, weekly or monthly "
+                   "granularity, compared to the MSCI ACWI benchmark on "
+                   "demand. The cards below add distribution, monthly "
+                   "heatmap and drawdown views.",
+                   className="card-subtitle"),
+            # Window picker (shares store with the Overview-tab period buttons).
+            html.Div([
+                html.Span("Period:",
+                          style={"color": "var(--text-secondary)",
+                                 "fontSize": "12px",
+                                 "marginRight": "8px"}),
+                html.Div([
+                    html.Button(p, id={"type": "ret-period-btn",
+                                       "period": p},
+                                className="period-btn"
+                                + (" active" if p == DEFAULT_PERIOD else ""),
+                                n_clicks=0)
+                    for p in PERIODS
+                ], className="period-switch"),
+            ], style={"display": "flex", "alignItems": "center",
+                      "marginBottom": "12px"}),
+            html.Div([
+                # Granularity
+                html.Div([
+                    html.Span("Granularity:",
+                              style={"color": "var(--text-secondary)",
+                                     "fontSize": "12px",
+                                     "marginRight": "8px"}),
+                    html.Div([
+                        html.Button("Daily",
+                                    id={"type": "ret-gran-btn", "gran": "D"},
+                                    className="period-btn", n_clicks=0),
+                        html.Button("Weekly",
+                                    id={"type": "ret-gran-btn", "gran": "W"},
+                                    className="period-btn", n_clicks=0),
+                        html.Button("Monthly",
+                                    id={"type": "ret-gran-btn", "gran": "M"},
+                                    className="period-btn active", n_clicks=0),
+                    ], className="period-switch"),
+                ], style={"display": "flex", "alignItems": "center"}),
+                # Mode
+                html.Div([
+                    html.Span("Show as:",
+                              style={"color": "var(--text-secondary)",
+                                     "fontSize": "12px",
+                                     "marginLeft": "20px",
+                                     "marginRight": "8px"}),
+                    html.Div([
+                        html.Button("TWR %",
+                                    id={"type": "ret-mode-btn", "mode": "pct"},
+                                    className="mode-btn active", n_clicks=0),
+                        html.Button("EUR",
+                                    id={"type": "ret-mode-btn", "mode": "eur"},
+                                    className="mode-btn", n_clicks=0),
+                    ], className="return-mode-switch"),
+                ], style={"display": "flex", "alignItems": "center"}),
+                # Benchmark toggle
+                html.Button(f"vs {BENCHMARK_NAME}",
+                            id="ret-benchmark-toggle",
+                            className="mode-btn", n_clicks=0,
+                            style={"marginLeft": "20px",
+                                   "padding": "6px 14px",
+                                   "border": "1px solid var(--border-subtle)",
+                                   "background": "var(--bg-elevated)",
+                                   "color": "var(--text-secondary)",
+                                   "borderRadius": "10px",
+                                   "cursor": "pointer", "fontSize": "12px"}),
+            ], style={"display": "flex", "alignItems": "center",
+                      "gap": "6px", "flexWrap": "wrap"}),
+        ], className="card"),
+
+        html.Div([
+            html.H3("Period returns", className="card-title"),
+            dcc.Loading(
+                dcc.Graph(id="ret-bars-chart",
+                          config={"displayModeBar": False}),
+                type="circle", color=COLOR_GREEN,
+            ),
+        ], className="card"),
+
+        html.Div([
+            html.H3("Period statistics", className="card-title"),
+            html.Div(id="ret-stats-grid"),
+        ], className="card"),
+
+        html.Div([
+            html.H3("Distribution of period returns",
+                    className="card-title"),
+            html.P("Where do returns cluster, and how fat are the tails?",
+                   className="card-subtitle"),
+            dcc.Loading(
+                dcc.Graph(id="ret-hist-chart",
+                          config={"displayModeBar": False}),
+                type="circle", color=COLOR_GREEN,
+            ),
+        ], className="card"),
+
+        html.Div([
+            html.H3("Monthly TWR heatmap", className="card-title"),
+            html.P("Each cell is one calendar month's time-weighted return. "
+                   "Rows are years, columns are months.",
+                   className="card-subtitle"),
+            dcc.Loading(
+                dcc.Graph(id="ret-heatmap-chart",
+                          config={"displayModeBar": False}),
+                type="circle", color=COLOR_GREEN,
+            ),
+        ], className="card"),
+
+        html.Div([
+            html.H3("Drawdown over time", className="card-title"),
+            html.P("Percent below the running high-water mark — "
+                   "peak-to-trough loss.", className="card-subtitle"),
+            dcc.Loading(
+                dcc.Graph(id="ret-drawdown-chart",
+                          config={"displayModeBar": False}),
+                type="circle", color=COLOR_GREEN,
+            ),
+        ], className="card"),
+    ])
+
+
 def transactions_tab() -> html.Div:
     return html.Div([
         html.Div([
@@ -223,6 +362,9 @@ app.layout = html.Div([
     dcc.Store(id="return-mode", data="twr"),
     dcc.Store(id="benchmark-on", data=False),
     dcc.Store(id="selected-isin", data=None),
+    dcc.Store(id="ret-granularity", data="M"),
+    dcc.Store(id="ret-mode", data="pct"),
+    dcc.Store(id="ret-benchmark-on", data=False),
     dcc.Interval(id="refresh-trigger", interval=5 * 60 * 1000, n_intervals=0),
 
     html.Div([
@@ -251,6 +393,8 @@ app.layout = html.Div([
              className="dash-tabs", children=[
         dcc.Tab(label="Overview", value="overview", className="dash-tab",
                 selected_className="dash-tab--selected", children=overview_tab()),
+        dcc.Tab(label="Returns", value="returns", className="dash-tab",
+                selected_className="dash-tab--selected", children=returns_tab()),
         dcc.Tab(label="Transactions", value="transactions",
                 className="dash-tab", selected_className="dash-tab--selected",
                 children=transactions_tab()),
@@ -269,21 +413,31 @@ app.layout = html.Div([
 
 @app.callback(
     Output("active-period", "data"),
-    Output({"type": "period-btn", "period": dash.ALL}, "className"),
     Input({"type": "period-btn", "period": dash.ALL}, "n_clicks"),
+    Input({"type": "ret-period-btn", "period": dash.ALL}, "n_clicks"),
     State("active-period", "data"),
 )
-def update_active_period(_clicks, current):
+def update_active_period(_ov_clicks, _ret_clicks, current):
+    """Either tab's period buttons write to the same shared store, so the
+    active window stays consistent across the Overview and Returns tabs."""
     ctx = callback_context
-    if not ctx.triggered or not any(_clicks):
-        period = current or DEFAULT_PERIOD
-    else:
-        trig = ctx.triggered[0]["prop_id"].split(".")[0]
-        import json
-        period = json.loads(trig)["period"]
+    if not ctx.triggered or not (any(_ov_clicks) or any(_ret_clicks)):
+        return current or DEFAULT_PERIOD
+    import json
+    trig = ctx.triggered[0]["prop_id"].split(".")[0]
+    return json.loads(trig)["period"]
+
+
+@app.callback(
+    Output({"type": "period-btn", "period": dash.ALL}, "className"),
+    Output({"type": "ret-period-btn", "period": dash.ALL}, "className"),
+    Input("active-period", "data"),
+)
+def sync_period_button_classes(period):
+    """Highlight the active period button on *both* tabs."""
     classes = ["period-btn" + (" active" if p == period else "")
                for p in PERIODS]
-    return period, classes
+    return classes, classes
 
 
 @app.callback(
@@ -328,6 +482,66 @@ def update_benchmark_toggle(n_clicks, current):
     return new_state, cls, style
 
 
+# ---- Returns tab toggles --------------------------------------------------
+@app.callback(
+    Output("ret-granularity", "data"),
+    Output({"type": "ret-gran-btn", "gran": dash.ALL}, "className"),
+    Input({"type": "ret-gran-btn", "gran": dash.ALL}, "n_clicks"),
+    State("ret-granularity", "data"),
+)
+def update_ret_gran(_clicks, current):
+    ctx = callback_context
+    grans = ["D", "W", "M"]
+    if not ctx.triggered or not any(_clicks):
+        g = current or "M"
+    else:
+        import json
+        trig = ctx.triggered[0]["prop_id"].split(".")[0]
+        g = json.loads(trig)["gran"]
+    return g, ["period-btn" + (" active" if x == g else "") for x in grans]
+
+
+@app.callback(
+    Output("ret-mode", "data"),
+    Output({"type": "ret-mode-btn", "mode": dash.ALL}, "className"),
+    Input({"type": "ret-mode-btn", "mode": dash.ALL}, "n_clicks"),
+    State("ret-mode", "data"),
+)
+def update_ret_mode(_clicks, current):
+    ctx = callback_context
+    modes = ["pct", "eur"]
+    if not ctx.triggered or not any(_clicks):
+        m = current or "pct"
+    else:
+        import json
+        trig = ctx.triggered[0]["prop_id"].split(".")[0]
+        m = json.loads(trig)["mode"]
+    return m, ["mode-btn" + (" active" if x == m else "") for x in modes]
+
+
+@app.callback(
+    Output("ret-benchmark-on", "data"),
+    Output("ret-benchmark-toggle", "className"),
+    Output("ret-benchmark-toggle", "style"),
+    Input("ret-benchmark-toggle", "n_clicks"),
+    State("ret-benchmark-on", "data"),
+)
+def update_ret_benchmark_toggle(n_clicks, current):
+    new_state = (not bool(current)) if n_clicks else False
+    cls = "mode-btn active" if new_state else "mode-btn"
+    style = {"marginLeft": "20px", "padding": "6px 14px",
+             "borderRadius": "10px", "cursor": "pointer", "fontSize": "12px",
+             "border": "1px solid var(--border-subtle)"}
+    if new_state:
+        style.update({"background": "var(--accent-green)",
+                      "color": "#0a0a0a", "fontWeight": "600",
+                      "borderColor": "transparent"})
+    else:
+        style.update({"background": "var(--bg-elevated)",
+                      "color": "var(--text-secondary)"})
+    return new_state, cls, style
+
+
 # ---------------------------------------------------------------------------
 # Callbacks: refresh button
 # ---------------------------------------------------------------------------
@@ -338,10 +552,15 @@ def update_benchmark_toggle(n_clicks, current):
     Input("refresh-trigger", "n_intervals"),
 )
 def refresh_prices(n_clicks, n_intervals):
-    force = bool(n_clicks and n_clicks > 0 and
-                 callback_context.triggered_id == "refresh-prices-btn")
+    button_clicked = bool(n_clicks and n_clicks > 0 and
+                          callback_context.triggered_id == "refresh-prices-btn")
     try:
-        prices = ds.refresh_live_prices(force=force)
+        # Button click → wait for fresh prices (user has asked to wait).
+        # Page-load / Interval → return cached immediately, refresh in bg.
+        # Either way the UI renders instantly with whatever's in cache; the
+        # button press just guarantees the cache is fresh before returning.
+        prices = ds.refresh_live_prices(force=button_clicked,
+                                        blocking=button_clicked)
         ds.get_value_panel(refresh=False)
     except Exception as e:
         return f"Price refresh error: {e!s}"
@@ -391,24 +610,14 @@ def render_kpis(_status, period):
     # for yesterday without the source-mismatch noise we used to see.
     today_val = ds.current_value()
 
-    # gettex quotes most stocks/ETFs until ~22-23h CET (well past Xetra's
-    # 17:30 close), so the live mid is real-time during any reasonable
-    # checking hour. We still prefer the panel-based delta when gettex's
-    # /timeseries/historical has returned something for today, because
-    # that's what the Scalable app tends to show. When the panel is
-    # forward-filled from yesterday — i.e. gettex hasn't yet returned a
-    # today-row — we fall back to (live total) − (yesterday's close).
-    panel_today = float(panel.value.iloc[-1])
+    # Today's change uses the LIVE total minus yesterday's panel close
+    # minus today's external flow. We keep it strictly live-based so the
+    # KPI moves the moment you click "Refresh prices" — the panel's
+    # gettex /timeseries/historical snapshot is cached for hours and
+    # would otherwise stay stuck even after a fresh live fetch.
     today_yest = float(panel.value.iloc[-2]) if len(panel.value) > 1 else today_val
     today_flow = float(panel.external_flow.iloc[-1])
-    panel_change = panel_today - today_yest - today_flow
-    live_change = today_val - today_yest - today_flow
-    # Floating-point dust threshold (€1) — if the panel-based change is
-    # tinier than that, the panel is forward-filled and live wins.
-    if abs(panel_change) >= 1.0:
-        todays_change = panel_change
-    else:
-        todays_change = live_change
+    todays_change = today_val - today_yest - today_flow
     todays_change_pct = (todays_change / today_yest) if today_yest else 0.0
 
     sub_val, sub_flow = _window_slice(panel, period)
@@ -588,6 +797,7 @@ def _make_perf_figure(value, flow, mode: str, period: str,
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
+        font=_CHART_FONT,
         # Generous room for tick labels — narrow margins were clipping the
         # leftmost euro / percent labels and the bottommost date.
         margin=dict(l=64, r=20, t=10, b=44),
@@ -599,20 +809,21 @@ def _make_perf_figure(value, flow, mode: str, period: str,
         transition=dict(duration=180, easing="linear"),
         xaxis=dict(showgrid=False, zeroline=False, color=COLOR_GREY,
                    hoverformat="%d %b %Y", automargin=True,
+                   tickfont=_CHART_FONT,
                    showspikes=True, spikemode="across", spikesnap="cursor",
                    spikecolor="rgba(40,235,207,0.4)",
                    spikethickness=1, spikedash="dot"),
         yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
                    zeroline=True, zerolinecolor="rgba(255,255,255,0.15)",
-                   color=COLOR_GREY, automargin=True, **y_axis),
+                   color=COLOR_GREY, automargin=True,
+                   tickfont=_CHART_FONT, **y_axis),
         showlegend=benchmark_on,
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="right", x=1, bgcolor="rgba(0,0,0,0)",
-                    font=dict(color=COLOR_GREY, size=11)),
+                    font=dict(family=_CHART_FONT["family"],
+                              color=COLOR_GREY, size=11)),
         hovermode="x unified",
-        hoverlabel=dict(bgcolor="#16181d", bordercolor="#25282f",
-                        font=dict(family="Inter", size=12,
-                                  color="#f4f4f6")),
+        hoverlabel=_HOVER_LABEL,
     )
     return fig
 
@@ -681,25 +892,26 @@ def render_value_chart(period, benchmark_on, _status):
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=_CHART_FONT,
         margin=dict(l=64, r=20, t=10, b=44),
         height=340,
         transition=dict(duration=180, easing="linear"),
         xaxis=dict(showgrid=False, zeroline=False, color=COLOR_GREY,
                    hoverformat="%d %b %Y", automargin=True,
+                   tickfont=_CHART_FONT,
                    showspikes=True, spikemode="across", spikesnap="cursor",
                    spikecolor="rgba(40,235,207,0.4)",
                    spikethickness=1, spikedash="dot"),
         yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
                    color=COLOR_GREY, tickprefix="€", tickformat=",.0f",
-                   automargin=True),
+                   automargin=True, tickfont=_CHART_FONT),
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="right", x=1, bgcolor="rgba(0,0,0,0)",
-                    font=dict(color=COLOR_GREY, size=11)),
+                    font=dict(family=_CHART_FONT["family"],
+                              color=COLOR_GREY, size=11)),
         hovermode="x unified",
-        hoverlabel=dict(bgcolor="#16181d", bordercolor="#25282f",
-                        font=dict(family="Inter", size=12,
-                                  color="#f4f4f6")),
+        hoverlabel=_HOVER_LABEL,
     )
     return fig
 
@@ -1657,11 +1869,14 @@ def render_allocation(_status):
     pie_pos.update_layout(
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=_CHART_FONT,
         margin=dict(l=10, r=10, t=10, b=10), height=320,
         showlegend=False,
         annotations=[dict(text="Positions",
-                          x=0.5, y=0.5, font_size=14, showarrow=False,
-                          font_color=COLOR_GREY)],
+                          x=0.5, y=0.5, showarrow=False,
+                          font=dict(family=_CHART_FONT["family"],
+                                    color=COLOR_GREY, size=14))],
+        hoverlabel=_HOVER_LABEL,
     )
 
     region_agg = df.groupby("region")["value"].sum().reset_index()
@@ -1673,11 +1888,14 @@ def render_allocation(_status):
     pie_region.update_layout(
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=_CHART_FONT,
         margin=dict(l=10, r=10, t=10, b=10), height=320,
         showlegend=False,
         annotations=[dict(text="Region",
-                          x=0.5, y=0.5, font_size=14, showarrow=False,
-                          font_color=COLOR_GREY)],
+                          x=0.5, y=0.5, showarrow=False,
+                          font=dict(family=_CHART_FONT["family"],
+                                    color=COLOR_GREY, size=14))],
+        hoverlabel=_HOVER_LABEL,
     )
 
     return html.Div([
@@ -1727,21 +1945,21 @@ def render_cash_chart(_status):
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=_CHART_FONT,
         margin=dict(l=64, r=20, t=10, b=44), height=300,
         transition=dict(duration=180, easing="linear"),
         xaxis=dict(showgrid=False, color=COLOR_GREY,
                    hoverformat="%d %b %Y", automargin=True,
+                   tickfont=_CHART_FONT,
                    showspikes=True, spikemode="across", spikesnap="cursor",
                    spikecolor="rgba(40,235,207,0.4)",
                    spikethickness=1, spikedash="dot"),
         yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
                    color=COLOR_GREY, tickprefix="€", tickformat=",.0f",
-                   automargin=True),
+                   automargin=True, tickfont=_CHART_FONT),
         showlegend=False,
         hovermode="x unified",
-        hoverlabel=dict(bgcolor="#16181d", bordercolor="#25282f",
-                        font=dict(family="Inter", size=12,
-                                  color="#f4f4f6")),
+        hoverlabel=_HOVER_LABEL,
     )
     return fig
 
@@ -1802,6 +2020,391 @@ def render_dividends(_status):
             ],
         ),
     ])
+
+
+# ---------------------------------------------------------------------------
+# Returns tab — data helpers
+# ---------------------------------------------------------------------------
+
+_RESAMPLE_MAP = {"D": None, "W": "W-FRI", "M": "ME"}
+BENCH_COLOR = "#a78bfa"
+BENCH_FILL = "rgba(167,139,250,0.18)"
+
+def _gran_label(gran: str, what: str = "long") -> str:
+    if what == "long":
+        return {"D": "day", "W": "week", "M": "month"}.get(gran, "period")
+    return {"D": "Daily", "W": "Weekly", "M": "Monthly"}.get(gran, "Period")
+
+
+def _fmt_period_date(ts: pd.Timestamp, gran: str) -> str:
+    """Format a period-end date in the way a human would label that bucket."""
+    if gran == "M":
+        return ts.strftime("%b %Y")          # "Jul 2025"
+    if gran == "W":
+        return f"Week of {ts.strftime('%d %b %Y')}"
+    return ts.strftime("%d %b %Y")           # daily
+
+
+def _portfolio_period_returns(value: pd.Series, flow: pd.Series,
+                               gran: str, mode: str) -> pd.Series:
+    """Period returns in either TWR % or EUR. ``value`` and ``flow`` are the
+    panel series already sliced to the selected window."""
+    if mode == "pct":
+        idx = twr_series(value, flow)
+        if gran == "D":
+            r = idx.pct_change()
+            r = r[idx.index.dayofweek < 5]
+        else:
+            r = idx.resample(_RESAMPLE_MAP[gran]).last().pct_change()
+        return (r.dropna() * 100)
+    daily = value.diff() - flow
+    daily = daily.fillna(0)
+    if gran == "D":
+        return daily[value.index.dayofweek < 5]
+    return daily.resample(_RESAMPLE_MAP[gran]).sum()
+
+
+def _benchmark_period_returns(value: pd.Series, gran: str,
+                               mode: str) -> pd.Series | None:
+    bench = ds.get_benchmark_series()
+    if bench is None or bench.empty or bench.isna().all():
+        return None
+    bench_window = bench.reindex(value.index).ffill().dropna()
+    if bench_window.empty:
+        return None
+    if mode == "pct":
+        if gran == "D":
+            r = bench_window.pct_change()
+            r = r[bench_window.index.dayofweek < 5]
+        else:
+            r = bench_window.resample(_RESAMPLE_MAP[gran]).last().pct_change()
+        return (r.dropna() * 100)
+    start_val = float(value.iloc[0])
+    if start_val <= 0:
+        return None
+    ratio = bench_window / float(bench_window.iloc[0])
+    eur_curve = ratio * start_val
+    daily = eur_curve.diff().fillna(0)
+    if gran == "D":
+        return daily[bench_window.index.dayofweek < 5]
+    return daily.resample(_RESAMPLE_MAP[gran]).sum()
+
+
+def _max_streak(mask: pd.Series) -> int:
+    best = cur = 0
+    for b in mask.values:
+        if b:
+            cur += 1
+            best = max(best, cur)
+        else:
+            cur = 0
+    return best
+
+
+# ---------------------------------------------------------------------------
+# Returns tab — chart callbacks
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("ret-bars-chart", "figure"),
+    Input("ret-granularity", "data"),
+    Input("ret-mode", "data"),
+    Input("ret-benchmark-on", "data"),
+    Input("active-period", "data"),
+    Input("prices-status", "children"),
+)
+def render_ret_bars(gran, mode, bench_on, period, _status):
+    panel = ds.get_value_panel()
+    value, flow = _window_slice(panel, period or DEFAULT_PERIOD)
+    gran = gran or "M"
+    mode = mode or "pct"
+    rets = _portfolio_period_returns(value, flow, gran, mode).round(2)
+    if rets.empty:
+        return go.Figure()
+
+    if mode == "pct":
+        hover_fmt = "%{y:+.2f}%"
+        y_axis = dict(ticksuffix="%", tickformat=".2~f")
+    else:
+        hover_fmt = "€%{y:+,.2f}"
+        y_axis = dict(tickprefix="€", tickformat=",.0f")
+
+    colors = [COLOR_GREEN if v >= 0 else COLOR_RED for v in rets.values]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=rets.index, y=rets.values,
+        marker_color=colors, marker_line_width=0,
+        hovertemplate=hover_fmt + "<extra>Portfolio</extra>",
+        name="Portfolio",
+    ))
+    if bench_on:
+        b = _benchmark_period_returns(value, gran, mode)
+        if b is not None and not b.empty:
+            b = b.round(2)
+            fig.add_trace(go.Scatter(
+                x=b.index, y=b.values, mode="lines",
+                line=dict(color=BENCH_COLOR, width=2,
+                          shape="spline", smoothing=0.45),
+                hovertemplate=hover_fmt + "<extra>" + BENCHMARK_NAME + "</extra>",
+                name=BENCHMARK_NAME,
+            ))
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=_CHART_FONT,
+        margin=dict(l=64, r=20, t=10, b=44),
+        height=380,
+        transition=dict(duration=180, easing="linear"),
+        xaxis=dict(showgrid=False, zeroline=False, color="#9aa0aa",
+                   hoverformat=("%b %Y" if gran == "M"
+                                else "%d %b %Y"),
+                   automargin=True, tickfont=_CHART_FONT),
+        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
+                   zeroline=True, zerolinecolor="rgba(255,255,255,0.15)",
+                   color="#9aa0aa", automargin=True,
+                   tickfont=_CHART_FONT, **y_axis),
+        showlegend=bench_on,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, bgcolor="rgba(0,0,0,0)",
+                    font=dict(family=_CHART_FONT["family"],
+                              color="#9aa0aa", size=11)),
+        hovermode="x unified",
+        hoverlabel=_HOVER_LABEL,
+        bargap=0.1,
+    )
+    return fig
+
+
+@app.callback(
+    Output("ret-hist-chart", "figure"),
+    Input("ret-granularity", "data"),
+    Input("ret-mode", "data"),
+    Input("ret-benchmark-on", "data"),
+    Input("active-period", "data"),
+    Input("prices-status", "children"),
+)
+def render_ret_histogram(gran, mode, bench_on, period, _status):
+    panel = ds.get_value_panel()
+    value, flow = _window_slice(panel, period or DEFAULT_PERIOD)
+    gran = gran or "M"
+    mode = mode or "pct"
+    rets = _portfolio_period_returns(value, flow, gran, mode).round(2)
+    if rets.empty:
+        return go.Figure()
+    is_pct = (mode == "pct")
+    fmt = "%{x:+.2f}%" if is_pct else "€%{x:+,.2f}"
+
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=rets.values, nbinsx=40,
+        marker=dict(color=COLOR_GREEN_FILL,
+                    line=dict(color=COLOR_GREEN, width=1)),
+        hovertemplate=fmt + "<br>count %{y}<extra>Portfolio</extra>",
+        name="Portfolio",
+    ))
+    if bench_on:
+        b = _benchmark_period_returns(value, gran, mode)
+        if b is not None and not b.empty:
+            fig.add_trace(go.Histogram(
+                x=b.values, nbinsx=40,
+                marker=dict(color=BENCH_FILL,
+                            line=dict(color=BENCH_COLOR, width=1)),
+                hovertemplate=fmt + "<br>count %{y}<extra>" + BENCHMARK_NAME + "</extra>",
+                name=BENCHMARK_NAME,
+                opacity=0.65,
+            ))
+
+    mean = float(rets.mean())
+    fig.add_vline(x=0, line=dict(color="rgba(255,255,255,0.25)", width=1,
+                                 dash="dot"))
+    mean_label = (f"mean {mean:+.2f}%" if is_pct
+                  else f"mean €{mean:+,.2f}")
+    fig.add_vline(x=mean, line=dict(color=COLOR_GREEN, width=1.5, dash="dash"),
+                  annotation_text=mean_label,
+                  annotation_position="top right",
+                  annotation_font=dict(family=_CHART_FONT["family"],
+                                       color=COLOR_GREEN, size=11))
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=_CHART_FONT,
+        margin=dict(l=64, r=20, t=10, b=44),
+        height=340,
+        barmode="overlay",
+        xaxis=dict(showgrid=False, color="#9aa0aa", automargin=True,
+                   tickfont=_CHART_FONT,
+                   **({"ticksuffix": "%", "tickformat": ".2~f"} if is_pct
+                      else {"tickprefix": "€", "tickformat": ",.0f"})),
+        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
+                   color="#9aa0aa", automargin=True,
+                   tickfont=_CHART_FONT, title=dict(text="Count",
+                                                    font=_CHART_FONT)),
+        showlegend=bench_on,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, bgcolor="rgba(0,0,0,0)",
+                    font=dict(family=_CHART_FONT["family"],
+                              color="#9aa0aa", size=11)),
+        hoverlabel=_HOVER_LABEL,
+    )
+    return fig
+
+
+@app.callback(
+    Output("ret-heatmap-chart", "figure"),
+    Input("active-period", "data"),
+    Input("prices-status", "children"),
+)
+def render_ret_heatmap(period, _status):
+    panel = ds.get_value_panel()
+    value, flow = _window_slice(panel, period or DEFAULT_PERIOD)
+    idx = twr_series(value, flow)
+    monthly = (idx.resample("ME").last().pct_change().dropna() * 100)
+    if monthly.empty:
+        return go.Figure()
+
+    df = pd.DataFrame({"r": monthly.values, "date": monthly.index})
+    df["year"] = df["date"].dt.year
+    df["month"] = df["date"].dt.month
+    pivot = df.pivot(index="year", columns="month", values="r")
+    pivot = pivot.reindex(columns=range(1, 13))
+    month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    text = [[("" if pd.isna(v) else f"{v:+.2f}%") for v in row]
+            for row in pivot.values]
+
+    vmax = float(max(abs(monthly.min()), abs(monthly.max())) or 1)
+    fig = go.Figure(data=go.Heatmap(
+        z=pivot.values,
+        x=month_labels,
+        y=[str(y) for y in pivot.index.tolist()],
+        zmin=-vmax, zmax=vmax,
+        colorscale=[[0.0, COLOR_RED], [0.5, "#16181d"], [1.0, COLOR_GREEN]],
+        hovertemplate="%{y} %{x}<br>%{z:+.2f}%<extra></extra>",
+        text=text, texttemplate="%{text}",
+        textfont=dict(family=_CHART_FONT["family"], size=11,
+                      color="#f4f4f6"),
+        colorbar=dict(thickness=10, len=0.7, ticksuffix="%",
+                      tickformat=".2~f",
+                      tickfont=dict(family=_CHART_FONT["family"],
+                                    color="#9aa0aa", size=10)),
+    ))
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=_CHART_FONT,
+        margin=dict(l=64, r=20, t=10, b=20),
+        height=max(220, 40 * len(pivot.index)),
+        xaxis=dict(color="#9aa0aa", side="top", tickfont=_CHART_FONT),
+        yaxis=dict(color="#9aa0aa", autorange="reversed",
+                   tickfont=_CHART_FONT),
+        hoverlabel=_HOVER_LABEL,
+    )
+    return fig
+
+
+@app.callback(
+    Output("ret-drawdown-chart", "figure"),
+    Input("active-period", "data"),
+    Input("prices-status", "children"),
+)
+def render_ret_drawdown(period, _status):
+    panel = ds.get_value_panel()
+    value, flow = _window_slice(panel, period or DEFAULT_PERIOD)
+    idx = twr_series(value, flow)
+    running_max = idx.cummax()
+    dd = ((idx / running_max - 1) * 100).round(2)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=dd.index, y=dd.values, mode="lines",
+        line=dict(color=COLOR_RED, width=2, shape="spline", smoothing=0.45),
+        fill="tozeroy", fillcolor=COLOR_RED_FILL,
+        hovertemplate="%{y:+.2f}%<extra>Drawdown</extra>",
+        name="Drawdown",
+    ))
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=_CHART_FONT,
+        margin=dict(l=64, r=20, t=10, b=44), height=320,
+        transition=dict(duration=180, easing="linear"),
+        xaxis=dict(showgrid=False, zeroline=False, color="#9aa0aa",
+                   hoverformat="%d %b %Y", automargin=True,
+                   tickfont=_CHART_FONT,
+                   showspikes=True, spikemode="across", spikesnap="cursor",
+                   spikecolor="rgba(255,85,96,0.4)",
+                   spikethickness=1, spikedash="dot"),
+        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
+                   zeroline=True, zerolinecolor="rgba(255,255,255,0.15)",
+                   color="#9aa0aa", automargin=True, tickfont=_CHART_FONT,
+                   ticksuffix="%", tickformat=".2~f"),
+        showlegend=False,
+        hovermode="x unified",
+        hoverlabel=_HOVER_LABEL,
+    )
+    return fig
+
+
+@app.callback(
+    Output("ret-stats-grid", "children"),
+    Input("ret-granularity", "data"),
+    Input("ret-mode", "data"),
+    Input("active-period", "data"),
+    Input("prices-status", "children"),
+)
+def render_ret_stats(gran, mode, period, _status):
+    panel = ds.get_value_panel()
+    value, flow = _window_slice(panel, period or DEFAULT_PERIOD)
+    gran = gran or "M"
+    pct = _portfolio_period_returns(value, flow, gran, "pct")
+    if pct.empty:
+        return html.Div("No data for the selected period.", className="muted")
+
+    n = len(pct)
+    pos = int((pct > 0).sum())
+    hit = pos / n if n else 0
+    best_idx = pct.idxmax()
+    worst_idx = pct.idxmin()
+    winners = pct[pct > 0]
+    losers = pct[pct < 0]
+    streak_pos = _max_streak(pct > 0)
+    streak_neg = _max_streak(pct < 0)
+
+    period_word = _gran_label(gran, "long")
+    plural = period_word + "s"
+
+    def fp(v): return fmt_pct(v / 100)
+
+    cells = [
+        (f"Periods ({plural})", f"{n}", "muted"),
+        ("Hit rate", fmt_pct(hit), "pos" if hit > 0.5 else "muted"),
+        (f"Best {period_word}",
+         f"{fp(pct.max())}  ·  {_fmt_period_date(best_idx, gran)}", "pos"),
+        (f"Worst {period_word}",
+         f"{fp(pct.min())}  ·  {_fmt_period_date(worst_idx, gran)}", "neg"),
+        ("Mean return", fp(pct.mean()), color_class(pct.mean())),
+        ("Median return", fp(pct.median()), color_class(pct.median())),
+        (f"Std dev per {period_word}", fp(pct.std()), "muted"),
+        (f"Avg winning {period_word}",
+         fp(winners.mean()) if not winners.empty else "—", "pos"),
+        (f"Avg losing {period_word}",
+         fp(losers.mean()) if not losers.empty else "—", "neg"),
+        ("Longest pos. streak", f"{streak_pos} {plural}", "pos"),
+        ("Longest neg. streak", f"{streak_neg} {plural}", "neg"),
+        ("Skew", fmt_num(float(pct.skew()), 2) if len(pct) > 2 else "—",
+         "muted"),
+    ]
+    return html.Div([
+        html.Div([
+            html.Div(label, className="kpi-label"),
+            html.Div(value, className="kpi-value " + cls,
+                     style={"fontSize": "15px"}),
+        ], className="kpi-card", style={"padding": "12px 14px"})
+        for label, value, cls in cells
+    ], style={"display": "grid",
+              "gridTemplateColumns": "repeat(4, 1fr)", "gap": "12px"})
 
 
 # ---------------------------------------------------------------------------

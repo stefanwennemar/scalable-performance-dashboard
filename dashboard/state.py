@@ -70,24 +70,73 @@ def load_state(force: bool = False) -> DashboardState:
         return _state
 
 
-def refresh_live_prices(force: bool = False) -> dict[str, LivePrice]:
-    """Fetch live gettex prices for all currently held positions."""
-    st = load_state()
+# Guards against firing two playwright sessions in parallel — the second
+# would just lose against the first and waste a Chromium launch.
+_bg_refresh_lock = threading.Lock()
+_bg_refresh_running = False
+
+
+def _do_blocking_refresh(st, force: bool) -> dict[str, LivePrice]:
+    """Run a Playwright price scrape and write the result into ``st``."""
+    isins = list(st.portfolio.positions.keys())
+    hints = slug_hints_from_isins(isins)
+    hints.update(get_slug_hints_from_cache(isins))
+    prices = fetch_live_prices(isins, slug_hints=hints,
+                               force_refresh=force, concurrency=6)
     with st._lock:
-        if (not force and st.live_prices and
-                (time.time() - st.live_prices_at) < CACHE_TTL_SECONDS):
-            return st.live_prices
-        isins = list(st.portfolio.positions.keys())
-        # Two layers of hints: ISIN-prefix a-priori guess (certificates →
-        # ``zertifikat``), overridden by any cached slug that's previously
-        # been confirmed by a successful scrape.
-        hints = slug_hints_from_isins(isins)
-        hints.update(get_slug_hints_from_cache(isins))
-        prices = fetch_live_prices(isins, slug_hints=hints,
-                                   force_refresh=force, concurrency=6)
         st.live_prices = prices
         st.live_prices_at = time.time()
-        return prices
+    return prices
+
+
+def _kick_background_refresh(st) -> None:
+    """Spawn a daemon thread that re-scrapes live prices and overwrites the
+    in-memory cache. No-op if a refresh is already running."""
+    global _bg_refresh_running
+    with _bg_refresh_lock:
+        if _bg_refresh_running:
+            return
+        _bg_refresh_running = True
+
+    def _runner():
+        global _bg_refresh_running
+        try:
+            _do_blocking_refresh(st, force=False)
+        except Exception as e:
+            print(f"[bg refresh] error: {e}")
+        finally:
+            with _bg_refresh_lock:
+                _bg_refresh_running = False
+
+    threading.Thread(target=_runner, daemon=True, name="bg-price-refresh").start()
+
+
+def refresh_live_prices(force: bool = False,
+                        blocking: bool = True) -> dict[str, LivePrice]:
+    """Fetch live gettex prices for all currently held positions.
+
+    ``blocking=False`` returns the cached prices immediately and (if the
+    cache is stale) kicks off a background refresh that will update the
+    cache for the next call. This is used on page-load / interval-fired
+    refreshes so the user never waits 2-3 minutes for the UI to render.
+
+    ``blocking=True`` always returns fresh prices (running the scrape on
+    the calling thread). Used when the user explicitly clicks the
+    "Refresh prices" button — they've asked for fresh data so we deliver.
+    """
+    st = load_state()
+    cache_fresh = (st.live_prices and
+                   (time.time() - st.live_prices_at) < CACHE_TTL_SECONDS)
+    if not force and cache_fresh:
+        return st.live_prices
+    if not blocking and st.live_prices:
+        # Stale-while-revalidate: hand the caller what we have, refresh in
+        # the background so the next callback gets fresh data.
+        _kick_background_refresh(st)
+        return st.live_prices
+    # Either user explicitly forced, or there's no cache at all to fall
+    # back to (first call after process start). Block on the scrape.
+    return _do_blocking_refresh(st, force=force)
 
 
 def get_value_panel(refresh: bool = False) -> ValuePanel:
