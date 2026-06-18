@@ -295,6 +295,9 @@ def returns_tab() -> html.Div:
 
 def transactions_tab() -> html.Div:
     return html.Div([
+        # Pending-orders card (rendered as muted note when API is off or
+        # there's nothing pending — render_pending_orders decides).
+        html.Div(id="pending-orders-card"),
         html.Div([
             html.H3("Realized P&L (FIFO)", className="card-title"),
             html.P("Each row is one sell — including corporate-action write-offs "
@@ -798,6 +801,14 @@ def render_kpis(_status, period):
     twr = metrics.get("twr", float("nan"))
     abs_pnl_gross = metrics.get("absolute_pnl", float("nan"))
     tax_window = _window_tax(panel, period)
+
+    # When the Scalable CLI is connected, prefer its own per-window
+    # simpleAbsoluteReturn for the gross PnL — it's the exact number the
+    # Scalable app shows. Periods the API doesn't expose (e.g. 3Y) fall
+    # back to our panel-based calculation.
+    if api_returns is not None and api_returns.get(period) is not None:
+        abs_pnl_gross = float(api_returns[period])
+
     abs_pnl_net = abs_pnl_gross - tax_window
     twr_net = (abs_pnl_net / (metrics["start_value"] + max(
         metrics["net_external_flow"], 0))) if metrics else float("nan")
@@ -1458,6 +1469,11 @@ def render_positions(_status):
     px = panel.prices
     live = state.live_prices
 
+    # Scalable's own FIFO cost basis per ISIN (sanity-check column). None
+    # when the API isn't connected, in which case the column stays blank
+    # and we don't trigger any drift highlighting.
+    api_fifo = _scalable_api.fifo_price_by_isin()
+
     rows = []
     for isin, pos in positions.items():
         lp = live.get(isin)
@@ -1473,11 +1489,22 @@ def render_positions(_status):
         unrealized_pct = (unrealized / pos.cost_basis * 100) if pos.cost_basis else 0
         day_change = (mid - yest_price) * pos.shares
         day_change_pct = ((mid / yest_price - 1) * 100) if yest_price else 0
+        # Per-share FIFO drift vs Scalable's reference.
+        if api_fifo is not None:
+            api_fp = api_fifo.get(isin)
+            avg_drift_eur = (round((pos.avg_cost - api_fp) * pos.shares, 2)
+                             if api_fp is not None else None)
+            api_fifo_disp = round(api_fp, 4) if api_fp is not None else None
+        else:
+            avg_drift_eur = None
+            api_fifo_disp = None
         rows.append({
             "isin": isin,
             "name": pos.description or isin,
             "shares": round(pos.shares, 4),
             "avg_cost": round(pos.avg_cost, 2),
+            "api_fifo": api_fifo_disp,
+            "fifo_drift": avg_drift_eur,
             "price": round(mid, 4),
             "value": round(market_value, 2),
             "weight": None,           # filled below
@@ -1513,6 +1540,15 @@ def render_positions(_status):
         {"name": "Unrealized (%)", "id": "unrealized_pct", "type": "numeric",
          "format": {"specifier": ",.2f"}},
     ]
+    # Append Scalable-FIFO cross-check columns at the right end only when
+    # the API is connected (so CSV-only users see no empty columns).
+    if api_fifo is not None:
+        columns += [
+            {"name": "Scalable FIFO (€)", "id": "api_fifo", "type": "numeric",
+             "format": {"specifier": ",.2f"}},
+            {"name": "FIFO drift (€)", "id": "fifo_drift", "type": "numeric",
+             "format": {"specifier": ",.2f"}},
+        ]
 
     return html.Div([
         html.Div([
@@ -1548,6 +1584,19 @@ def render_positions(_status):
                 + _pnl_heatmap_rules("day_change_pct", bands_pct=True)
                 + _pnl_heatmap_rules("unrealized", bands_pct=False)
                 + _pnl_heatmap_rules("unrealized_pct", bands_pct=True)
+                # Flag rows whose lifetime cost basis differs from
+                # Scalable's by more than 5 EUR. Amber so it reads as
+                # "investigate" rather than red/green PnL.
+                + ([
+                    {"if": {"filter_query": "{fifo_drift} > 5",
+                            "column_id": "fifo_drift"},
+                     "backgroundColor": "rgba(240,185,11,0.20)",
+                     "color": "#f0b90b", "fontWeight": "500"},
+                    {"if": {"filter_query": "{fifo_drift} < -5",
+                            "column_id": "fifo_drift"},
+                     "backgroundColor": "rgba(240,185,11,0.20)",
+                     "color": "#f0b90b", "fontWeight": "500"},
+                ] if api_fifo is not None else [])
             ),
         ),
     ])
@@ -2008,6 +2057,67 @@ def render_transactions(_status):
     ])
 
 
+@app.callback(
+    Output("pending-orders-card", "children"),
+    Input("prices-status", "children"),
+)
+def render_pending_orders(_status):
+    """Only shows up when the Scalable API is connected AND at least one
+    order is open/pending. Silent otherwise."""
+    if not _scalable_api.is_available():
+        return None
+    pending = _scalable_api.pending_orders()
+    if not pending:
+        return None
+    rows = [{
+        "date": (p.get("last_event_datetime") or "")[:10],
+        "side": p.get("side") or "—",
+        "type": (p.get("security_transaction_type") or "").title()
+                  or "Single",
+        "quantity": p.get("quantity"),
+        "description": p.get("description") or "—",
+        "isin": p.get("isin") or "—",
+        "limit_price": p.get("limit_price"),
+        "amount": p.get("amount") or 0,
+        "currency": p.get("currency") or "EUR",
+        "status": (p.get("status") or "").title(),
+    } for p in pending]
+    columns = [
+        {"name": "Date",       "id": "date"},
+        {"name": "Side",       "id": "side"},
+        {"name": "Type",       "id": "type"},
+        {"name": "Quantity",   "id": "quantity", "type": "numeric",
+         "format": {"specifier": ",.4f"}},
+        {"name": "Position",   "id": "description"},
+        {"name": "ISIN",       "id": "isin"},
+        {"name": "Limit (€)",  "id": "limit_price", "type": "numeric",
+         "format": {"specifier": ",.2f"}},
+        {"name": "Amount (€)", "id": "amount", "type": "numeric",
+         "format": {"specifier": ",.2f"}},
+        {"name": "Status",     "id": "status"},
+    ]
+    return html.Div([
+        html.H3("Pending orders", className="card-title"),
+        html.P("Open / unsettled orders straight from your Scalable "
+               "account. Not yet in your CSV.", className="card-subtitle"),
+        dash_table.DataTable(
+            columns=columns, data=rows,
+            sort_action="native",
+            sort_by=[{"column_id": "date", "direction": "desc"}],
+            page_action="none",
+            style_header=_DT_STYLE_HEADER,
+            style_cell=_DT_STYLE_CELL_NOWRAP,
+            style_table=_DT_STYLE_TABLE,
+            style_data=_DT_STYLE_DATA,
+            style_cell_conditional=[
+                {"if": {"column_id": c}, "textAlign": "left"}
+                for c in ("date", "side", "type", "description", "isin",
+                          "status")
+            ],
+        ),
+    ], className="card")
+
+
 # ---------------------------------------------------------------------------
 # Allocation tab
 # ---------------------------------------------------------------------------
@@ -2071,12 +2181,57 @@ def render_allocation(_status):
         hoverlabel=_HOVER_LABEL,
     )
 
-    return html.Div([
+    pies = [
         html.Div(dcc.Graph(figure=pie_pos, config={"displayModeBar": False}),
-                 style={"flex": "1"}),
-        html.Div(dcc.Graph(figure=pie_region, config={"displayModeBar": False}),
-                 style={"flex": "1"}),
-    ], style={"display": "flex", "gap": "20px"})
+                 style={"flex": "1", "minWidth": "260px"}),
+    ]
+
+    # When the Scalable CLI is connected, use its richer pre-computed
+    # breakdowns (product type, equity sector, asset class, region)
+    # instead of our ISIN-prefix country guess. Same pies fall back to
+    # the country-guess region pie otherwise.
+    api_breakdowns = _scalable_api.allocation_breakdowns()
+    if api_breakdowns:
+        for key in ("PRODUCT_TYPE", "ASSET_CLASS", "EQUITY_SECTOR", "REGION"):
+            rows_api = api_breakdowns.get(key)
+            if not rows_api:
+                continue
+            labels = [r["label"] for r in rows_api]
+            values = [
+                (r["value_eur"] if r["value_eur"] is not None
+                 else r["weight"]) for r in rows_api
+            ]
+            pie = go.Figure(data=[go.Pie(
+                labels=labels, values=values, hole=0.55,
+                hovertemplate=("<b>%{label}</b><br>€%{value:,.2f}<br>"
+                               "%{percent}<extra></extra>"),
+                marker=dict(line=dict(color="#16181d", width=2)),
+            )])
+            pie.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=_CHART_FONT,
+                margin=dict(l=10, r=10, t=10, b=10), height=320,
+                showlegend=False,
+                annotations=[dict(
+                    text=_scalable_api.allocation_nice_name(key),
+                    x=0.5, y=0.5, showarrow=False,
+                    font=dict(family=_CHART_FONT["family"],
+                              color=COLOR_GREY, size=14))],
+                hoverlabel=_HOVER_LABEL,
+            )
+            pies.append(html.Div(
+                dcc.Graph(figure=pie, config={"displayModeBar": False}),
+                style={"flex": "1", "minWidth": "260px"}))
+    else:
+        # API not available — keep the country-guess region pie.
+        pies.append(html.Div(
+            dcc.Graph(figure=pie_region, config={"displayModeBar": False}),
+            style={"flex": "1", "minWidth": "260px"}))
+
+    return html.Div(pies, style={"display": "flex", "gap": "20px",
+                                  "flexWrap": "wrap"})
 
 
 def _isin_region(isin: str) -> str:

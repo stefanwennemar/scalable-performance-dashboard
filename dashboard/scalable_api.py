@@ -234,6 +234,16 @@ def live_mid_by_isin() -> dict[str, float] | None:
             and h.get("quote_currency", "EUR").upper() == "EUR"}
 
 
+def fifo_price_by_isin() -> dict[str, float] | None:
+    """Scalable's own FIFO cost basis per ISIN — useful as a cross-check
+    against our own FIFO engine."""
+    items = holdings()
+    if items is None:
+        return None
+    return {h["isin"]: float(h["fifo_price"]) for h in items
+            if h.get("fifo_price") is not None}
+
+
 _PERIOD_TO_API_KEY = {
     "1D": "INTRADAY",
     "1W": "ONE_WEEK",
@@ -271,6 +281,80 @@ def valuation_total() -> float | None:
     if val.get("total") is None:
         return None
     return float(val["total"])
+
+
+_PENDING_STATUSES = {"CREATED", "REQUESTED", "PENDING", "PARTIAL_FILLED",
+                     "CANCEL_REQUESTED"}
+
+
+_ALLOC_NICE_NAME = {
+    "PRODUCT_TYPE": "Product type",
+    "ASSET_CLASS": "Asset class",
+    "EQUITY_SECTOR": "Equity sector",
+    "FIXED_INCOME_SECTOR": "Fixed-income sector",
+    "REGION": "Region",
+    "COUNTRY": "Country",
+}
+
+
+def _label_for_bucket(pos: dict) -> str:
+    return (pos.get("name") or pos.get("label")
+            or pos.get("id", "").split("-")[-1] or "other").replace("_", " ")
+
+
+def allocation_breakdowns() -> dict[str, list[dict]] | None:
+    """Return Scalable's pre-computed allocation pies as a dict keyed by
+    breakdown name (PRODUCT_TYPE, ASSET_CLASS, EQUITY_SECTOR, REGION,
+    ...). Each value is a list of ``{label, value_eur, weight}`` rows
+    ready to plot. ``None`` if the API isn't available."""
+    if not is_available():
+        return None
+    data = _run_sc_json(["broker", "analytics", "--json"])
+    if not data:
+        return None
+    out: dict[str, list[dict]] = {}
+    for buckets in (data.get("result") or {}).get("allocations") or []:
+        bid = buckets.get("id", "")
+        # ID looks like "<portfolio>-Allocations-<TYPE>"
+        key = bid.rsplit("-", 1)[-1] if "-" in bid else bid
+        rows = []
+        for pos in buckets.get("positions") or []:
+            weight = float(pos.get("weight") or 0.0)
+            val_obj = pos.get("valuation") or {}
+            val_eur = (float(val_obj.get("amount"))
+                       if isinstance(val_obj, dict)
+                       and val_obj.get("amount") is not None
+                       else None)
+            rows.append({
+                "label": _label_for_bucket(pos).title(),
+                "value_eur": val_eur,
+                "weight": weight,
+            })
+        if rows:
+            out[key] = rows
+    return out or None
+
+
+def allocation_nice_name(key: str) -> str:
+    return _ALLOC_NICE_NAME.get(key, key.replace("_", " ").title())
+
+
+def pending_orders(limit: int = 25) -> list[dict] | None:
+    """Open / unsettled orders that haven't shown up in the CSV yet."""
+    if not is_available():
+        return None
+    data = _run_sc_json(["broker", "transactions", "--page-size", str(limit),
+                         "--json"])
+    if not data:
+        return None
+    items = (data.get("result") or {}).get("items") or []
+    out: list[dict] = []
+    for it in items:
+        st = (it.get("status") or "").upper()
+        if st not in _PENDING_STATUSES:
+            continue
+        out.append(it)
+    return out
 
 
 # ---------------------------------------------------------------------------
