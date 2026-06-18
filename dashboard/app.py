@@ -365,6 +365,11 @@ app.layout = html.Div([
     dcc.Store(id="ret-granularity", data="M"),
     dcc.Store(id="ret-mode", data="pct"),
     dcc.Store(id="ret-benchmark-on", data=False),
+    dcc.Store(id="api-modal-open", data=False),
+    # Polls the API status every 4 s while the connect modal is open so
+    # the dashboard auto-closes the modal the moment login completes.
+    dcc.Interval(id="api-status-poll", interval=4000, n_intervals=0,
+                 disabled=True),
     dcc.Interval(id="refresh-trigger", interval=5 * 60 * 1000, n_intervals=0),
 
     html.Div([
@@ -376,18 +381,36 @@ app.layout = html.Div([
                 className="app-subtitle"),
         ]),
         html.Div([
-            html.Button("Refresh prices", id="refresh-prices-btn",
-                        className="period-btn", n_clicks=0,
-                        style={"background": "var(--bg-elevated)",
-                               "color": "var(--text-primary)",
-                               "padding": "8px 16px", "borderRadius": "10px",
-                               "border": "none", "cursor": "pointer"}),
+            # Top row: API pill + refresh button on one horizontal line.
+            html.Div([
+                html.Div([
+                    html.Span(className="dot"),
+                    html.Span("Checking…", id="api-pill-text"),
+                ], id="api-status-pill", className="api-pill", n_clicks=0),
+                html.Button("Refresh prices", id="refresh-prices-btn",
+                            className="period-btn", n_clicks=0,
+                            style={"background": "var(--bg-elevated)",
+                                   "color": "var(--text-primary)",
+                                   "padding": "8px 16px",
+                                   "borderRadius": "10px",
+                                   "border": "none", "cursor": "pointer"}),
+            ], style={"display": "flex", "alignItems": "center",
+                      "justifyContent": "flex-end", "flexWrap": "wrap"}),
+            # Sub-row: "Live prices: x/y fresh · updated …" sits below both.
             html.Div(id="prices-status",
                      style={"color": "var(--text-secondary)",
                             "fontSize": "11px", "marginTop": "6px",
                             "textAlign": "right"}),
-        ]),
+        ], style={"display": "flex", "flexDirection": "column",
+                  "alignItems": "stretch"}),
     ], className="app-header"),
+
+    # Connect / install modal (lazy — empty children when closed).
+    html.Div(id="api-modal", children=[]),
+
+    # Hidden Location component the connect-button uses to open the
+    # captured OAuth URL in a new tab.
+    dcc.Location(id="api-login-redirect", refresh=False),
 
     dcc.Tabs(id="tabs", value="overview", parent_className="dash-tabs",
              className="dash-tabs", children=[
@@ -480,6 +503,150 @@ def update_benchmark_toggle(n_clicks, current):
         style.update({"background": "var(--bg-elevated)",
                       "color": "var(--text-secondary)"})
     return new_state, cls, style
+
+
+# ---------------------------------------------------------------------------
+# Scalable-API status pill + connect modal
+# ---------------------------------------------------------------------------
+
+from . import scalable_api as _scalable_api
+
+
+_PILL_BY_STATE = {
+    "connected": ("connected",
+                  "Scalable API · connected",
+                  "Live prices, today's change and valuations come straight "
+                  "from your Scalable account."),
+    "logged_out": ("connectable",
+                   "Scalable API · connect",
+                   "Click to connect for live prices straight from "
+                   "Scalable Capital."),
+    "missing": ("missing",
+                "Scalable API · install for live data",
+                "Click for setup instructions."),
+    "error": ("error",
+              "Scalable API · reconnect",
+              "Click to reconnect."),
+}
+
+
+@app.callback(
+    Output("api-status-pill", "className"),
+    Output("api-pill-text", "children"),
+    Output("api-status-pill", "title"),
+    Input("prices-status", "children"),       # triggered on every refresh
+    Input("api-status-poll", "n_intervals"),  # active while modal is open
+)
+def render_api_pill(_status, _ticks):
+    s = _scalable_api.status()
+    cls, label, tip = _PILL_BY_STATE.get(
+        s.state, ("error", "Scalable API · error", s.detail or ""))
+    return f"api-pill {cls}", label, tip
+
+
+@app.callback(
+    Output("api-modal-open", "data"),
+    Output("api-status-poll", "disabled"),
+    Output("api-login-redirect", "href"),
+    Input("api-status-pill", "n_clicks"),
+    Input({"type": "api-modal-btn", "action": dash.ALL}, "n_clicks"),
+    Input("api-status-poll", "n_intervals"),
+    State("api-modal-open", "data"),
+)
+def manage_api_modal(_pill_clicks, _btn_clicks, _ticks, is_open):
+    """Manage modal open/close + ``sc login`` lifecycle.
+
+    Trigger map:
+    - clicking the pill opens the modal (if not already connected)
+    - the modal's "Connect now" action spawns ``sc login`` and returns the
+      captured URL so the user's browser opens it automatically
+    - the "Cancel" action kills the login process and closes the modal
+    - the poll interval auto-closes the modal once whoami says we're in
+    """
+    ctx = callback_context
+    trig = ctx.triggered_id
+
+    # Auto-close when login completes.
+    if (is_open and isinstance(trig, str)
+            and trig == "api-status-poll"
+            and _scalable_api.is_available()):
+        return False, True, dash.no_update
+
+    # Pill click → open the modal (unless we're already connected, in
+    # which case the pill is just informational).
+    if trig == "api-status-pill":
+        s = _scalable_api.status(force=True)
+        if s.state == "connected":
+            return False, True, dash.no_update
+        return True, False, dash.no_update
+
+    # Modal action button.
+    if isinstance(trig, dict) and trig.get("type") == "api-modal-btn":
+        action = trig.get("action")
+        if action == "cancel":
+            _scalable_api.cancel_login()
+            return False, True, dash.no_update
+        if action == "connect":
+            url = _scalable_api.start_login()
+            # Even if no URL was scraped, the CLI usually opens the system
+            # browser itself — keep the modal open so the poll detects
+            # session completion.
+            return True, False, (url or dash.no_update)
+
+    return is_open or False, not bool(is_open), dash.no_update
+
+
+@app.callback(
+    Output("api-modal", "children"),
+    Input("api-modal-open", "data"),
+)
+def render_api_modal(is_open):
+    if not is_open:
+        return []
+    s = _scalable_api.status()
+
+    if s.state == "missing":
+        body = html.Div([
+            html.H3("Install the Scalable CLI"),
+            html.P("The dashboard works without it, but if you install "
+                   "Scalable's official CLI you'll get instant live prices "
+                   "(no more 3-minute warmups), Scalable's own today's-change "
+                   "value, and full coverage of derivatives."),
+            html.P("On a Mac, run this once in Terminal:"),
+            html.Pre("brew tap scalablecapital/sc && brew install sc"),
+            html.P("On Windows / Linux see the install instructions at:"),
+            html.Pre("https://github.com/ScalableCapital/scalable-cli"),
+            html.P("After installing, re-open the dashboard and click the "
+                   "status pill again to log in."),
+            html.Div([
+                html.Button("Got it", id={"type": "api-modal-btn",
+                                          "action": "cancel"},
+                            className="modal-btn primary", n_clicks=0),
+            ], className="modal-actions"),
+        ], className="modal-card")
+
+    else:
+        # logged_out / error / first-time connect
+        body = html.Div([
+            html.H3("Connect to Scalable Capital"),
+            html.P("Click below to start the device-code login. A page "
+                   "will open in a new tab — sign in with your Scalable "
+                   "account and confirm the prompt on your phone. "
+                   "The dashboard will switch to live data automatically "
+                   "the moment you approve."),
+            html.P("Nothing is sent anywhere; the session lives only on "
+                   "this computer.", className="muted"),
+            html.Div([
+                html.Button("Cancel", id={"type": "api-modal-btn",
+                                          "action": "cancel"},
+                            className="modal-btn", n_clicks=0),
+                html.Button("Connect now",
+                            id={"type": "api-modal-btn", "action": "connect"},
+                            className="modal-btn primary", n_clicks=0),
+            ], className="modal-actions"),
+        ], className="modal-card")
+
+    return html.Div(body, className="modal-backdrop")
 
 
 # ---- Returns tab toggles --------------------------------------------------
@@ -603,21 +770,27 @@ def render_kpis(_status, period):
     panel = ds.get_value_panel()
     state = ds.load_state()
 
-    # "Portfolio value" uses live gettex mid where available — most accurate
-    # snapshot of *now*. The panel stores gettex EOD closes (with yfinance
-    # fallback for ISINs gettex doesn't list) — both sources line up well
-    # enough that we can use the live mid for today and the panel close
-    # for yesterday without the source-mismatch noise we used to see.
-    today_val = ds.current_value()
+    # When the Scalable CLI is connected, its valuation.total IS the value
+    # the user sees in their Scalable app, and INTRADAY from its performance
+    # array IS the today's-change figure that app shows. Using them directly
+    # eliminates the structural reconciliation gap we've been fighting.
+    from . import scalable_api as _api
+    api_value = _api.valuation_total() if _api.is_available() else None
+    api_returns = (_api.absolute_return_by_period()
+                   if _api.is_available() else None)
 
-    # Today's change uses the LIVE total minus yesterday's panel close
-    # minus today's external flow. We keep it strictly live-based so the
-    # KPI moves the moment you click "Refresh prices" — the panel's
-    # gettex /timeseries/historical snapshot is cached for hours and
-    # would otherwise stay stuck even after a fresh live fetch.
+    if api_value is not None:
+        today_val = float(api_value)
+    else:
+        today_val = ds.current_value()
+
     today_yest = float(panel.value.iloc[-2]) if len(panel.value) > 1 else today_val
     today_flow = float(panel.external_flow.iloc[-1])
-    todays_change = today_val - today_yest - today_flow
+    if api_returns is not None and api_returns.get("1D") is not None:
+        # Scalable's own INTRADAY return — what the app's "today" card shows.
+        todays_change = float(api_returns["1D"])
+    else:
+        todays_change = today_val - today_yest - today_flow
     todays_change_pct = (todays_change / today_yest) if today_yest else 0.0
 
     sub_val, sub_flow = _window_slice(panel, period)

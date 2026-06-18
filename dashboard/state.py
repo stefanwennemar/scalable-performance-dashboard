@@ -23,6 +23,7 @@ from .portfolio import (build_portfolio, positions_to_dataframe,
 from .prices import (fetch_live_prices, get_slug_hints_from_cache,
                      slug_hints_from_isins,
                      LivePrice, CACHE_TTL_SECONDS)
+from . import scalable_api
 
 
 PRICE_PANEL_TTL_SECONDS = 12 * 60 * 60
@@ -76,8 +77,54 @@ _bg_refresh_lock = threading.Lock()
 _bg_refresh_running = False
 
 
+def _try_api_live_prices(st) -> dict[str, LivePrice] | None:
+    """If the Scalable CLI is connected, build LivePrice objects from
+    ``broker holdings`` (one HTTP call, ~150 ms, no missing positions).
+    Returns ``None`` to signal "API not usable, please fall back"."""
+    if not scalable_api.is_available():
+        return None
+    scalable_api.reset_cache()       # force refresh on explicit refresh
+    items = scalable_api.holdings()
+    if not items:
+        return None
+    out: dict[str, LivePrice] = {}
+    now = time.time()
+    open_isins = set(st.portfolio.positions.keys())
+    for item in items:
+        isin = item.get("isin")
+        if not isin or isin not in open_isins:
+            continue
+        mid = item.get("quote_mid_price")
+        if mid is None:
+            continue
+        bid = item.get("quote_bid_price")
+        ask = item.get("quote_ask_price")
+        out[isin] = LivePrice(
+            isin=isin,
+            bid=float(bid) if bid is not None else float(mid),
+            ask=float(ask) if ask is not None else float(mid),
+            mid=float(mid),
+            name=item.get("name"),
+            wkn=None,
+            slug=None,
+            fetched_at=now,
+            source="scalable_api",
+        )
+    return out or None
+
+
 def _do_blocking_refresh(st, force: bool) -> dict[str, LivePrice]:
-    """Run a Playwright price scrape and write the result into ``st``."""
+    """Refresh live prices. Prefers the Scalable CLI when connected
+    (single HTTP call covers every position including derivatives gettex
+    can't quote); otherwise falls back to the Playwright gettex scrape
+    so users without the API still get a working dashboard."""
+    api_prices = _try_api_live_prices(st)
+    if api_prices is not None:
+        with st._lock:
+            st.live_prices = api_prices
+            st.live_prices_at = time.time()
+        return api_prices
+
     isins = list(st.portfolio.positions.keys())
     hints = slug_hints_from_isins(isins)
     hints.update(get_slug_hints_from_cache(isins))

@@ -65,6 +65,118 @@ html, body {
     margin-top: 4px;
 }
 
+/* --- Scalable-API status pill -------------------------------------------- */
+.api-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    font-weight: 500;
+    padding: 4px 12px;
+    border-radius: 999px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    cursor: default;
+    transition: background 120ms, color 120ms, border-color 120ms;
+    margin-right: 12px;
+}
+.api-pill.connected {
+    color: var(--accent-green);
+    background: rgba(40, 235, 207, 0.08);
+    border-color: rgba(40, 235, 207, 0.35);
+}
+.api-pill.connectable, .api-pill.error {
+    color: #f0b90b;
+    background: rgba(240, 185, 11, 0.08);
+    border-color: rgba(240, 185, 11, 0.35);
+    cursor: pointer;
+}
+.api-pill.missing {
+    color: var(--text-tertiary);
+    cursor: pointer;
+}
+.api-pill .dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+/* --- Modal --------------------------------------------------------------- */
+.modal-backdrop {
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+}
+.modal-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
+    padding: 28px 28px 22px;
+    max-width: 520px;
+    width: 92%;
+    box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.8);
+    animation: fadeUp 260ms cubic-bezier(.2,.7,.2,1);
+}
+.modal-card h3 {
+    margin: 0 0 8px;
+    font-size: 18px;
+    font-weight: 600;
+}
+.modal-card p {
+    color: var(--text-secondary);
+    line-height: 1.55;
+    margin: 6px 0 12px;
+    font-size: 13.5px;
+}
+.modal-card ol { margin: 8px 0 4px; padding-left: 18px; color: var(--text-secondary); }
+.modal-card ol li { color: var(--text-primary); margin: 6px 0; }
+.modal-card pre {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--accent-green);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin: 8px 0;
+}
+.modal-actions {
+    display: flex; gap: 10px; justify-content: flex-end;
+    margin-top: 20px;
+}
+.modal-btn {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-primary);
+    padding: 8px 16px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background 120ms;
+}
+.modal-btn:hover { background: var(--bg-card-hover); }
+.modal-btn.primary {
+    background: var(--accent-green);
+    color: #0a0a0a;
+    border-color: transparent;
+}
+.modal-btn.primary:hover {
+    background: var(--accent-green);
+    filter: brightness(1.06);
+}
+
 .kpi-row {
     display: grid;
     grid-template-columns: repeat(6, 1fr);
