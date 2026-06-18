@@ -378,10 +378,15 @@ app.layout = html.Div([
     html.Div([
         html.Div([
             html.H1("Scalable Performance Dashboard", className="app-title"),
-            html.Div(
-                f"Transactions exported {STATE.tx.file_timestamp.strftime('%Y-%m-%d %H:%M')} "
-                f"· {len(STATE.tx.raw):,} executed rows",
-                className="app-subtitle"),
+            html.Div([
+                f"Transactions exported "
+                f"{STATE.tx.file_timestamp.strftime('%Y-%m-%d %H:%M')} · "
+                f"{len(STATE.tx.raw):,} rows",
+                html.Span(
+                    f"  · +{STATE.api_added} pulled live from Scalable API"
+                    if STATE.api_added else "",
+                    style={"color": "var(--accent-green)"}),
+            ], className="app-subtitle"),
         ]),
         html.Div([
             # Top row: API pill + refresh button on one horizontal line.

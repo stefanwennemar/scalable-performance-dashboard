@@ -10,10 +10,13 @@ from __future__ import annotations
 import glob
 import os
 import re
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
 import pandas as pd
+from zoneinfo import ZoneInfo
+
+BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
 TX_DIR = os.path.join(os.path.dirname(__file__), "..", "transaction_data")
 
@@ -119,3 +122,144 @@ def isin_descriptions(tx: pd.DataFrame) -> dict[str, str]:
     """Map each ISIN to its most-recently-seen description."""
     sub = tx.dropna(subset=["isin", "description"]).sort_values("datetime")
     return dict(zip(sub["isin"], sub["description"]))
+
+
+# ---------------------------------------------------------------------------
+# Optional augmentation with transactions from the Scalable API
+# ---------------------------------------------------------------------------
+
+def _utc_str_to_berlin_naive(utc_str: str) -> pd.Timestamp:
+    """Convert an API last_event_datetime (ISO-8601, UTC) into a Berlin-local
+    naive ``Timestamp`` so it lines up with the CSV's German local times."""
+    ts = pd.Timestamp(utc_str)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts.tz_convert(BERLIN_TZ).tz_localize(None)
+
+
+def _api_item_to_csv_row(item: dict, csv_type: str) -> dict | None:
+    """Translate one API transaction record into the CSV-shape row used by
+    ``load_transactions``. Returns ``None`` for unmapped items."""
+    is_security = item.get("type") == "SECURITY_TRANSACTION"
+    when_utc = item.get("last_event_datetime")
+    if not when_utc:
+        return None
+    when_berlin = _utc_str_to_berlin_naive(when_utc)
+    amount = item.get("amount")
+    quantity = item.get("quantity")
+    isin = item.get("isin") if is_security else item.get("related_isin")
+    description = item.get("description") or ""
+
+    if is_security:
+        shares = float(quantity) if quantity not in (None, "") else float("nan")
+        # API summary doesn't expose fee/tax — leave as 0 so the FIFO
+        # engine doesn't double-deduct anything we already have in CSV.
+        price = (abs(float(amount)) / shares
+                 if amount not in (None, "") and shares else float("nan"))
+        # CSV sign convention: Buy/Savings plan/Reinvestment_Distribution
+        # have negative cash impact; Sell positive. API already follows
+        # that, so we don't flip signs.
+    else:
+        shares = float("nan")
+        price = float("nan")
+
+    return {
+        "date": when_berlin.strftime("%Y-%m-%d"),
+        "time": when_berlin.strftime("%H:%M:%S"),
+        "status": "Executed",
+        "reference": item.get("id") or "",
+        "description": description or pd.NA,
+        "assetType": "Security" if is_security else "Cash",
+        "type": csv_type,
+        "isin": isin or pd.NA,
+        "shares": shares,
+        "price": price,
+        "amount": float(amount) if amount not in (None, "") else float("nan"),
+        "fee": 0.0,
+        "tax": 0.0,
+        "currency": item.get("currency") or "EUR",
+        "datetime": when_berlin,
+    }
+
+
+def augment_with_api_transactions(tx: LoadedTransactions,
+                                   api_items: list[dict]) -> tuple[LoadedTransactions, int]:
+    """Merge new transactions from the Scalable API into the CSV-derived
+    ``LoadedTransactions``. Returns ``(new_tx, n_added)``.
+
+    Only API items strictly newer than the CSV's latest ``datetime`` are
+    appended — anything overlapping is assumed already present in the CSV.
+    """
+    # Late import so this module stays usable without the API dependency.
+    from . import scalable_api
+
+    if not api_items:
+        return tx, 0
+
+    csv_max = tx.raw["datetime"].max()
+
+    # CSV timestamps have second precision; the API returns milliseconds.
+    # A transaction in the API at e.g. 19:46:58.594 is the same event the
+    # CSV exports at 19:46:58 — including it again would double-count.
+    # Round the cutoff up to the next second and require strict >.
+    if pd.notna(csv_max):
+        cutoff = (pd.Timestamp(csv_max).floor("s")
+                  + pd.Timedelta(seconds=1))
+    else:
+        cutoff = None
+
+    # Also build a set of (isin, side, quantity, second) keys already in
+    # the CSV so we catch overlap on identical events the cutoff misses.
+    csv_keys: set[tuple] = set()
+    for r in tx.raw.itertuples(index=False):
+        if r.assetType != "Security":
+            continue
+        key = (r.isin or "", str(r.type or ""),
+               round(float(r.shares), 6) if pd.notna(r.shares) else None,
+               pd.Timestamp(r.datetime).floor("s"))
+        csv_keys.add(key)
+
+    new_rows: list[dict] = []
+    for item in api_items:
+        when_utc = item.get("last_event_datetime")
+        if not when_utc:
+            continue
+        when_berlin = _utc_str_to_berlin_naive(when_utc)
+        if cutoff is not None and when_berlin < cutoff:
+            continue  # already covered by the CSV export
+        csv_type = scalable_api._csv_type(item)
+        if csv_type is None:
+            continue
+        row = _api_item_to_csv_row(item, csv_type)
+        if row is None:
+            continue
+        # Second-pass dedup by event identity.
+        if row["assetType"] == "Security":
+            key = (
+                row["isin"] or "",
+                row["type"],
+                round(float(row["shares"]), 6) if pd.notna(row["shares"])
+                else None,
+                pd.Timestamp(row["datetime"]).floor("s"),
+            )
+            if key in csv_keys:
+                continue
+        new_rows.append(row)
+
+    if not new_rows:
+        return tx, 0
+
+    extra = pd.DataFrame(new_rows)
+    # Align columns to match the CSV-loaded shape.
+    for col in tx.raw.columns:
+        if col not in extra.columns:
+            extra[col] = pd.NA
+    extra = extra[tx.raw.columns]
+
+    combined = (pd.concat([tx.raw, extra], ignore_index=True)
+                .sort_values("datetime")
+                .reset_index(drop=True))
+    securities = combined[combined["assetType"] == "Security"].copy()
+    cash = combined[combined["assetType"] == "Cash"].copy()
+    new_tx = replace(tx, raw=combined, securities=securities, cash=cash)
+    return new_tx, len(new_rows)

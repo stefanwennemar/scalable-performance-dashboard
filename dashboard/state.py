@@ -14,7 +14,8 @@ import numpy as np
 import pandas as pd
 
 from .benchmark import BENCHMARK_ISIN, BENCHMARK_NAME, fetch_benchmark_prices
-from .data_loader import load_transactions, isin_descriptions, LoadedTransactions
+from .data_loader import (load_transactions, isin_descriptions,
+                          augment_with_api_transactions, LoadedTransactions)
 from .gettex_history import fetch_gettex_history
 from .historical_prices import get_all_prices
 from .performance import build_value_panel, effective_today, ValuePanel
@@ -42,6 +43,7 @@ class DashboardState:
     panel_at: float = 0.0
     benchmark: pd.Series | None = None       # daily EUR closes for IUSQ
     benchmark_at: float = 0.0
+    api_added: int = 0                       # transactions pulled from API
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -57,6 +59,26 @@ def load_state(force: bool = False) -> DashboardState:
         if _state is not None and not force:
             return _state
         tx = load_transactions()
+
+        # Optional augmentation: when the Scalable CLI is connected, pull
+        # everything settled since the CSV's last datetime and append. The
+        # FIFO/perf engines work on the same DataFrame either way.
+        api_added = 0
+        if scalable_api.is_available():
+            try:
+                csv_max = tx.raw["datetime"].max()
+                from_utc = None
+                if pd.notna(csv_max):
+                    # Convert Berlin-naive → UTC ISO for the API filter.
+                    from_utc = (pd.Timestamp(csv_max).tz_localize("Europe/Berlin")
+                                .tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ"))
+                items = scalable_api.fetch_settled_transactions(
+                    from_utc=from_utc)
+                if items:
+                    tx, api_added = augment_with_api_transactions(tx, items)
+            except Exception as e:
+                print(f"[api sync] skipped — {e}")
+
         portfolio = build_portfolio(tx.raw)
         descriptions = isin_descriptions(tx.raw)
         positions_df = positions_to_dataframe(portfolio.positions)
@@ -67,7 +89,11 @@ def load_state(force: bool = False) -> DashboardState:
             descriptions=descriptions,
             positions_df=positions_df,
             realized_df=realized_df,
+            api_added=api_added,
         )
+        if api_added:
+            print(f"[api sync] +{api_added} transactions added "
+                  f"since CSV export")
         return _state
 
 

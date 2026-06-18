@@ -287,6 +287,88 @@ _PENDING_STATUSES = {"CREATED", "REQUESTED", "PENDING", "PARTIAL_FILLED",
                      "CANCEL_REQUESTED"}
 
 
+# -------- Transaction-shape mapping (API → CSV columns) --------------------
+
+_SEC_TYPE_TO_CSV = {
+    "SINGLE_BUY": "Buy",        # synthetic; we look at side too
+    "SINGLE_SELL": "Sell",
+    "SAVINGS_PLAN": "Savings plan",
+    "REINVESTMENT": "Reinvestment_Distribution",
+    "REINVESTMENT_DISTRIBUTION": "Reinvestment_Distribution",
+    "REINVESTMENT_POCKET_MONEY": "Reinvestment_Distribution",
+    "TRANSFER_IN": "Security transfer",
+    "TRANSFER_OUT": "Security transfer",
+    "SWAP_IN": "Corporate action",
+    "SWAP_OUT": "Corporate action",
+}
+
+_CASH_TYPE_TO_CSV = {
+    "DEPOSIT": "Deposit",
+    "WITHDRAWAL": "Withdrawal",
+    "CASH_TRANSFER_IN": "Cash Transfer In",
+    "CASH_TRANSFER_OUT": "Cash Transfer Out",
+    "DISTRIBUTION": "Distribution",
+    "INTEREST": "Interest",
+    "TAX": "Taxes",
+    "TAX_RETURN": "Taxes",
+    "FEE": "Taxes",                       # closest CSV bucket
+    "POCKET_MONEY": "Distribution",
+}
+
+
+def _csv_type(api_item: dict) -> str | None:
+    """Map an API transaction item to the dashboard's CSV ``type`` label."""
+    api_type = api_item.get("type")
+    if api_type == "SECURITY_TRANSACTION":
+        sec_type = (api_item.get("security_transaction_type") or "").upper()
+        side = (api_item.get("side") or "").upper()
+        if sec_type == "SINGLE":
+            return "Buy" if side == "BUY" else ("Sell" if side == "SELL" else None)
+        return _SEC_TYPE_TO_CSV.get(sec_type)
+    if api_type == "CASH_TRANSACTION":
+        cash_type = (api_item.get("cash_transaction_type") or "").upper()
+        return _CASH_TYPE_TO_CSV.get(cash_type)
+    return None
+
+
+def fetch_settled_transactions(from_utc=None, max_pages: int = 40,
+                                page_size: int = 100) -> list[dict] | None:
+    """Paginated fetch of SETTLED security + cash transactions.
+
+    ``from_utc`` is an optional ISO-8601 (UTC) string used as the lower
+    bound — set to the CSV's last datetime so we only pull what's new.
+    """
+    if not is_available():
+        return None
+    items: list[dict] = []
+    cursor: str | None = None
+    seen_ids: set[str] = set()
+    for _ in range(max_pages):
+        # --status is repeatable; one flag per accepted state.
+        args = ["broker", "transactions", "--page-size", str(page_size),
+                "--status", "settled", "--status", "filled", "--json"]
+        if cursor:
+            args += ["--cursor", cursor]
+        if from_utc:
+            args += ["--from-time", from_utc]
+        data = _run_sc_json(args)
+        if not data:
+            break
+        result = data.get("result") or data
+        batch = result.get("items") or []
+        for it in batch:
+            tid = it.get("id")
+            if tid and tid in seen_ids:
+                continue
+            if tid:
+                seen_ids.add(tid)
+            items.append(it)
+        cursor = result.get("cursor")
+        if not cursor or not batch:
+            break
+    return items
+
+
 _ALLOC_NICE_NAME = {
     "PRODUCT_TYPE": "Product type",
     "ASSET_CLASS": "Asset class",
