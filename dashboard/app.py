@@ -369,6 +369,7 @@ app.layout = html.Div([
     dcc.Store(id="ret-mode", data="pct"),
     dcc.Store(id="ret-benchmark-on", data=False),
     dcc.Store(id="api-modal-open", data=False),
+    dcc.Store(id="api-login-url", data=None),
     # Polls the API status every 4 s while the connect modal is open so
     # the dashboard auto-closes the modal the moment login completes.
     dcc.Interval(id="api-status-poll", interval=4000, n_intervals=0,
@@ -415,10 +416,8 @@ app.layout = html.Div([
 
     # Connect / install modal (lazy — empty children when closed).
     html.Div(id="api-modal", children=[]),
-
-    # Hidden Location component the connect-button uses to open the
-    # captured OAuth URL in a new tab.
-    dcc.Location(id="api-login-redirect", refresh=False),
+    # Hidden output target for the clientside window.open callback.
+    html.Div(id="api-login-sink", style={"display": "none"}),
 
     dcc.Tabs(id="tabs", value="overview", parent_className="dash-tabs",
              className="dash-tabs", children=[
@@ -555,7 +554,7 @@ def render_api_pill(_status, _ticks):
 @app.callback(
     Output("api-modal-open", "data"),
     Output("api-status-poll", "disabled"),
-    Output("api-login-redirect", "href"),
+    Output("api-login-url", "data"),
     Input("api-status-pill", "n_clicks"),
     Input({"type": "api-modal-btn", "action": dash.ALL}, "n_clicks"),
     Input("api-status-poll", "n_intervals"),
@@ -566,8 +565,10 @@ def manage_api_modal(_pill_clicks, _btn_clicks, _ticks, is_open):
 
     Trigger map:
     - clicking the pill opens the modal (if not already connected)
-    - the modal's "Connect now" action spawns ``sc login`` and returns the
-      captured URL so the user's browser opens it automatically
+    - the modal's "Connect now" action spawns ``sc login`` and writes
+      the captured OAuth URL into the api-login-url Store — a clientside
+      callback then opens it via window.open(), and the modal also
+      renders it as a clickable link in case the popup is blocked
     - the "Cancel" action kills the login process and closes the modal
     - the poll interval auto-closes the modal once whoami says we're in
     """
@@ -578,37 +579,56 @@ def manage_api_modal(_pill_clicks, _btn_clicks, _ticks, is_open):
     if (is_open and isinstance(trig, str)
             and trig == "api-status-poll"
             and _scalable_api.is_available()):
-        return False, True, dash.no_update
+        return False, True, None
 
     # Pill click → open the modal (unless we're already connected, in
     # which case the pill is just informational).
     if trig == "api-status-pill":
         s = _scalable_api.status(force=True)
         if s.state == "connected":
-            return False, True, dash.no_update
-        return True, False, dash.no_update
+            return False, True, None
+        return True, False, None
 
     # Modal action button.
     if isinstance(trig, dict) and trig.get("type") == "api-modal-btn":
         action = trig.get("action")
         if action == "cancel":
             _scalable_api.cancel_login()
-            return False, True, dash.no_update
+            return False, True, None
         if action == "connect":
             url = _scalable_api.start_login()
-            # Even if no URL was scraped, the CLI usually opens the system
-            # browser itself — keep the modal open so the poll detects
-            # session completion.
-            return True, False, (url or dash.no_update)
+            # The clientside callback below pops the URL in a new tab the
+            # moment we write it; the modal also shows it as a clickable
+            # fallback in case the browser blocked window.open().
+            return True, False, (url or "")
 
     return is_open or False, not bool(is_open), dash.no_update
+
+
+# Open the captured OAuth URL in a new tab on the user's side. Runs as a
+# clientside JS callback so it's allowed to call window.open without a
+# server round-trip.
+app.clientside_callback(
+    """
+    function(url) {
+        if (url && typeof url === 'string' && url.startsWith('http')) {
+            window.open(url, '_blank', 'noopener,noreferrer');
+        }
+        return '';
+    }
+    """,
+    Output("api-login-sink", "children"),
+    Input("api-login-url", "data"),
+    prevent_initial_call=True,
+)
 
 
 @app.callback(
     Output("api-modal", "children"),
     Input("api-modal-open", "data"),
+    Input("api-login-url", "data"),
 )
-def render_api_modal(is_open):
+def render_api_modal(is_open, login_url):
     if not is_open:
         return []
     s = _scalable_api.status()
@@ -635,24 +655,53 @@ def render_api_modal(is_open):
 
     else:
         # logged_out / error / first-time connect
-        body = html.Div([
-            html.H3("Connect to Scalable Capital"),
-            html.P("Click below to start the device-code login. A page "
-                   "will open in a new tab — sign in with your Scalable "
-                   "account and confirm the prompt on your phone. "
-                   "The dashboard will switch to live data automatically "
-                   "the moment you approve."),
-            html.P("Nothing is sent anywhere; the session lives only on "
-                   "this computer.", className="muted"),
-            html.Div([
-                html.Button("Cancel", id={"type": "api-modal-btn",
-                                          "action": "cancel"},
-                            className="modal-btn", n_clicks=0),
-                html.Button("Connect now",
-                            id={"type": "api-modal-btn", "action": "connect"},
-                            className="modal-btn primary", n_clicks=0),
-            ], className="modal-actions"),
-        ], className="modal-card")
+        if login_url and login_url.startswith("http"):
+            # We've already spawned `sc login` and captured its OAuth URL.
+            # The clientside callback also tries to pop it in a new tab;
+            # the link below is the user-clickable fallback.
+            body = html.Div([
+                html.H3("Approve in your browser"),
+                html.P("A new tab should have opened with the Scalable "
+                       "login page. If not, click the button below."),
+                html.A("Open Scalable login page",
+                       href=login_url, target="_blank",
+                       rel="noopener noreferrer",
+                       className="modal-btn primary",
+                       style={"textDecoration": "none",
+                              "display": "inline-block",
+                              "marginTop": "8px"}),
+                html.P("Sign in and confirm the prompt on your phone. "
+                       "The dashboard will switch to live data the "
+                       "moment you approve — no need to come back here "
+                       "manually.",
+                       className="muted",
+                       style={"marginTop": "14px"}),
+                html.Div([
+                    html.Button("Cancel", id={"type": "api-modal-btn",
+                                              "action": "cancel"},
+                                className="modal-btn", n_clicks=0),
+                ], className="modal-actions"),
+            ], className="modal-card")
+        else:
+            body = html.Div([
+                html.H3("Connect to Scalable Capital"),
+                html.P("Click below to start the device-code login. A "
+                       "page will open in a new tab — sign in with your "
+                       "Scalable account and confirm the prompt on your "
+                       "phone. The dashboard will switch to live data "
+                       "automatically the moment you approve."),
+                html.P("Nothing is sent anywhere; the session lives only "
+                       "on this computer.", className="muted"),
+                html.Div([
+                    html.Button("Cancel", id={"type": "api-modal-btn",
+                                              "action": "cancel"},
+                                className="modal-btn", n_clicks=0),
+                    html.Button("Connect now",
+                                id={"type": "api-modal-btn",
+                                    "action": "connect"},
+                                className="modal-btn primary", n_clicks=0),
+                ], className="modal-actions"),
+            ], className="modal-card")
 
     return html.Div(body, className="modal-backdrop")
 
