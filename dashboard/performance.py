@@ -85,8 +85,6 @@ def build_value_panel(transactions: pd.DataFrame, prices: pd.DataFrame,
         if d not in dates:
             continue
         ttype = row.type
-        if ttype == "Taxes":
-            continue
         amount = row.amount if pd.notna(row.amount) else 0.0
         shares = row.shares if pd.notna(row.shares) else 0.0
 
@@ -101,13 +99,20 @@ def build_value_panel(transactions: pd.DataFrame, prices: pd.DataFrame,
         if row.assetType == "Cash":
             fee = row.fee if pd.notna(row.fee) else 0.0
             if ttype == "Distribution":
-                # Gross of withholding; cash gets the net. Tax outflow is
-                # treated as external so it doesn't depress performance.
+                # ``amount`` is already net of withholding tax. The tax
+                # outflow is treated as external so performance stays
+                # gross, matching Sell handling.
                 tax = row.tax if pd.notna(row.tax) else 0.0
-                cash_delta.loc[d] += (amount - tax)
+                cash_delta.loc[d] += amount
                 if tax != 0:
                     external.loc[d] -= tax
                     tax_paid.loc[d] += tax
+            elif ttype == "Tax refund":
+                # Refund triggered by a realised loss (knock-out): real
+                # cash, but tax — not performance.
+                cash_delta.loc[d] += amount
+                external.loc[d] += amount
+                tax_paid.loc[d] -= amount
             else:
                 cash_delta.loc[d] += (amount - fee)
                 if ttype in EXTERNAL_CASH_TYPES:
@@ -135,7 +140,7 @@ def build_value_panel(transactions: pd.DataFrame, prices: pd.DataFrame,
             if tax != 0:
                 external.loc[d] -= tax
                 tax_paid.loc[d] += tax
-        elif ttype == "Corporate action":
+        elif ttype in ("Corporate action", "Knock-out"):
             shares_delta.loc[d, isin] += shares  # can be negative (write-off)
         elif ttype == "Security transfer":
             shares_delta.loc[d, isin] += shares

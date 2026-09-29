@@ -44,16 +44,36 @@ full list. Highlights:
   cash. Cost basis includes fees (= `abs(amount)/shares`).
 - `Sell` consumes lots FIFO; realized P&L = proceeds − matched cost basis.
 - `Distribution` (Cash) = dividend/coupon — part of the security's total
-  return, **not** an external cash flow.
+  return, **not** an external cash flow. Its `amount` is already **net** of
+  withholding tax; `tax` is informational (gross = amount + tax).
 - `Deposit`, `Withdrawal`, `Cash Transfer In/Out` are the only true external
   cash flows used in TWR / XIRR denominators.
 - `Security transfer` (in or out) is in-kind, but for TWR purposes must
   count as an external flow valued at `shares * price` — otherwise an
-  in-kind transfer looks like free portfolio performance.
+  in-kind transfer looks like free portfolio performance. Out/in round
+  trips of the same ISIN+shares within a week are dropped so the original
+  cost basis survives; a genuine transfer-out realizes P&L at `price`.
 - `Corporate action` with negative shares at price ~€0.001 is a worthless
   write-off (treat as a sell at that price). Paired share-for-share
   exchanges between two ISINs net to zero.
-- `Taxes` (Cash) — small ad-hoc tax adjustments — are ignored.
+- **Derivative knock-outs**: Scalable books the tax refund from the loss as
+  a `Distribution` on the turbo's ISIN (amount = €0.001/share proceeds +
+  refund, tax = −refund), and the write-off row is sometimes missing.
+  `data_loader.normalize_derivative_knockouts` rewrites these into
+  `Knock-out` (security sell + cash proceeds) and `Tax refund` (cash,
+  external flow, reduces tax paid).
+- `Taxes` (Cash) — small ad-hoc tax adjustments — move cash but are
+  modelled as external flows, never performance.
+
+## Scalable CLI (`sc`)
+
+- The transactions list only has net cash per trade. Fee, withheld tax and
+  gross market value come from `sc broker transaction details`, cached in
+  `cache/sc_transaction_details.json`.
+- Knock-out write-offs come through as `NON_TRADE_SECURITY_TRANSACTION`
+  / `SWAP_OUT`.
+- `sc broker analytics` was removed from the CLI (by 1.0); only the
+  product-type allocation from `holdings` remains.
 
 ## Conventions worth keeping
 

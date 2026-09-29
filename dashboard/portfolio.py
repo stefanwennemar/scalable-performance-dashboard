@@ -18,11 +18,17 @@ Conventions:
   added at the given price (e.g. ticker switch).
 - Security transfer (positive shares) is treated as a transfer-in at the stated
   price (used as the lot cost basis).
-- Security transfer (negative shares) is treated as a transfer-out, removing
-  shares FIFO with no realized P&L (the realised P&L of an outbound transfer is
-  not knowable from this account alone).
+- Security transfer (negative shares) is treated as a transfer-out: shares
+  leave FIFO at the stated price, realizing the difference to cost basis.
+  That mirrors the value panel, which books the transfer as an external
+  outflow at ``shares * price``. Out/in round trips are collapsed upstream
+  (``data_loader.collapse_transfer_round_trips``).
+- Knock-out (Security, negative shares) is a derivative write-off at
+  €0.001/share — a sell at that price. Its Cash counterpart carries the
+  proceeds; the paired ``Tax refund`` cash row is not performance.
+  See ``data_loader.normalize_derivative_knockouts``.
 - Cash flows (Deposit, Withdrawal, Cash Transfer In/Out, Distribution,
-  Interest) update the cash balance only.
+  Interest, Tax refund) update the cash balance only.
 - Taxes are ignored entirely per the user's spec.
 """
 
@@ -170,19 +176,19 @@ def build_portfolio(transactions: pd.DataFrame) -> PortfolioState:
                 cash += amount - fee  # amount is already negative
                 withdrawals_total += -amount
             elif ttype == "Distribution":
-                # Distribution amount is gross of withholding tax; the actual
-                # cash movement is amount - tax.
+                # Distribution amount is already net of withholding tax
+                # (verified against the API's gross/tax split); ``tax``
+                # is informational.
                 tax = row.tax if pd.notna(row.tax) else 0.0
-                net = amount - tax
-                cash += net
+                cash += amount
                 if isin:
                     distributions.append({
                         "datetime": row.datetime,
                         "isin": isin,
                         "description": desc,
-                        "amount": amount,    # gross — used for "income" stats
+                        "amount": amount + tax,  # gross — "income" stats
                         "tax": tax,
-                        "net": net,
+                        "net": amount,
                     })
             elif ttype == "Interest":
                 # Empirically the Interest "amount" appears to already be
@@ -242,7 +248,7 @@ def build_portfolio(transactions: pd.DataFrame) -> PortfolioState:
                 "delta": net_cash, "type": ttype, "description": desc,
             })
 
-        elif ttype == "Corporate action":
+        elif ttype in ("Corporate action", "Knock-out"):
             # negative shares = write-off / removal; positive = added shares
             if shares < -EPS:
                 qty = -shares
@@ -251,8 +257,7 @@ def build_portfolio(transactions: pd.DataFrame) -> PortfolioState:
                 sell_price = abs(price) if price else 0.0
                 proceeds = abs(amount) if amount else 0.0
                 record_realized(row.datetime, isin, desc, qty, sell_price,
-                                proceeds, cost_basis, earliest,
-                                "Corporate action")
+                                proceeds, cost_basis, earliest, ttype)
                 # Cash effect of corporate action is recorded by the paired
                 # cash row (if any); the security row carries no cash.
             elif shares > EPS:
@@ -267,7 +272,12 @@ def build_portfolio(transactions: pd.DataFrame) -> PortfolioState:
                 add_lot(isin, row.datetime, shares, unit_cost,
                         "Security transfer")
             elif shares < -EPS:
-                _consume_fifo(lots_by_isin.get(isin, []), -shares)
+                qty = -shares
+                cost_basis, earliest = _consume_fifo(
+                    lots_by_isin.get(isin, []), qty)
+                record_realized(row.datetime, isin, desc, qty, price,
+                                qty * price, cost_basis, earliest,
+                                "Transfer out")
 
     positions: dict[str, Position] = {}
     for isin, lots in lots_by_isin.items():

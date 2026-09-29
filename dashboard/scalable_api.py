@@ -19,11 +19,13 @@ is connected. The original CSV-only behaviour stays intact.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -319,6 +321,12 @@ _CASH_TYPE_TO_CSV = {
 def _csv_type(api_item: dict) -> str | None:
     """Map an API transaction item to the dashboard's CSV ``type`` label."""
     api_type = api_item.get("type")
+    if api_type == "NON_TRADE_SECURITY_TRANSACTION":
+        # Knock-out write-offs arrive as SWAP_OUT at €0.001/share; the CSV
+        # exports the same event as a negative-share "Corporate action".
+        nt_type = (api_item.get("non_trade_security_transaction_type")
+                   or "").upper()
+        return _SEC_TYPE_TO_CSV.get(nt_type)
     if api_type == "SECURITY_TRANSACTION":
         sec_type = (api_item.get("security_transaction_type") or "").upper()
         side = (api_item.get("side") or "").upper()
@@ -369,6 +377,51 @@ def fetch_settled_transactions(from_utc=None, max_pages: int = 40,
     return items
 
 
+# ---------------------------------------------------------------------------
+# Per-transaction details (fees, taxes, execution price)
+# ---------------------------------------------------------------------------
+
+# The transactions list only carries the net cash amount. Fees, withheld
+# tax and the gross market value live in ``sc broker transaction details``.
+# Settled transactions never change, so their details are cached on disk.
+_DETAILS_CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", "cache",
+                                   "sc_transaction_details.json")
+_details_lock = threading.Lock()
+
+
+def _load_details_cache() -> dict[str, dict]:
+    try:
+        with open(_DETAILS_CACHE_PATH) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def transaction_details(ids: list[str], workers: int = 6
+                        ) -> dict[str, dict]:
+    """``{transaction_id: details_result}`` for the given ids. Missing or
+    failed lookups are simply absent from the result."""
+    with _details_lock:
+        cache = _load_details_cache()
+        missing = [i for i in dict.fromkeys(ids) if i not in cache]
+        if missing and is_available():
+            def fetch(tid: str) -> tuple[str, dict | None]:
+                data = _run_sc_json(["broker", "transaction", "details",
+                                     "--transaction-id", tid, "--json"])
+                return tid, (data.get("result") if data else None)
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                fetched = list(ex.map(fetch, missing))
+            new = {tid: d for tid, d in fetched
+                   if d and not d.get("is_pending")}
+            if new:
+                cache.update(new)
+                os.makedirs(os.path.dirname(_DETAILS_CACHE_PATH),
+                            exist_ok=True)
+                with open(_DETAILS_CACHE_PATH, "w") as f:
+                    json.dump(cache, f)
+    return {i: cache[i] for i in ids if i in cache}
+
+
 _ALLOC_NICE_NAME = {
     "PRODUCT_TYPE": "Product type",
     "ASSET_CLASS": "Asset class",
@@ -379,42 +432,43 @@ _ALLOC_NICE_NAME = {
 }
 
 
-def _label_for_bucket(pos: dict) -> str:
-    return (pos.get("name") or pos.get("label")
-            or pos.get("id", "").split("-")[-1] or "other").replace("_", " ")
+_SECURITY_TYPE_LABEL = {
+    "STOCK": "Stocks",
+    "ETF": "ETFs",
+    "DERIVATIVE": "Derivatives",
+    "BOND": "Bonds",
+    "FUND": "Funds",
+    "CRYPTO": "Crypto",
+}
 
 
 def allocation_breakdowns() -> dict[str, list[dict]] | None:
-    """Return Scalable's pre-computed allocation pies as a dict keyed by
-    breakdown name (PRODUCT_TYPE, ASSET_CLASS, EQUITY_SECTOR, REGION,
-    ...). Each value is a list of ``{label, value_eur, weight}`` rows
-    ready to plot. ``None`` if the API isn't available."""
-    if not is_available():
+    """Allocation pies keyed by breakdown name. Each value is a list of
+    ``{label, value_eur, weight}`` rows ready to plot. ``None`` if the API
+    isn't available.
+
+    ``sc broker analytics`` (which served sector/region/asset-class pies)
+    was removed from the CLI, so only the product-type split derived from
+    ``holdings`` is available now.
+    """
+    items = holdings()
+    if not items:
         return None
-    data = _run_sc_json(["broker", "analytics", "--json"])
-    if not data:
+    by_type: dict[str, float] = {}
+    for h in items:
+        val = h.get("valuation")
+        if val is None:
+            continue
+        label = _SECURITY_TYPE_LABEL.get(
+            (h.get("security_type") or "").upper(),
+            (h.get("security_type") or "Other").replace("_", " ").title())
+        by_type[label] = by_type.get(label, 0.0) + float(val)
+    total = sum(by_type.values())
+    if total <= 0:
         return None
-    out: dict[str, list[dict]] = {}
-    for buckets in (data.get("result") or {}).get("allocations") or []:
-        bid = buckets.get("id", "")
-        # ID looks like "<portfolio>-Allocations-<TYPE>"
-        key = bid.rsplit("-", 1)[-1] if "-" in bid else bid
-        rows = []
-        for pos in buckets.get("positions") or []:
-            weight = float(pos.get("weight") or 0.0)
-            val_obj = pos.get("valuation") or {}
-            val_eur = (float(val_obj.get("amount"))
-                       if isinstance(val_obj, dict)
-                       and val_obj.get("amount") is not None
-                       else None)
-            rows.append({
-                "label": _label_for_bucket(pos).title(),
-                "value_eur": val_eur,
-                "weight": weight,
-            })
-        if rows:
-            out[key] = rows
-    return out or None
+    rows = [{"label": k, "value_eur": v, "weight": v / total}
+            for k, v in sorted(by_type.items(), key=lambda kv: -kv[1])]
+    return {"PRODUCT_TYPE": rows}
 
 
 def allocation_nice_name(key: str) -> str:

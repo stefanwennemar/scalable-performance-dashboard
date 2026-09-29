@@ -14,7 +14,8 @@ from dash.exceptions import PreventUpdate
 
 from . import state as ds
 from .benchmark import BENCHMARK_NAME, compute_market_metrics
-from .performance import (annualised_return, compute_metrics, max_drawdown,
+from .performance import (EXTERNAL_CASH_TYPES, annualised_return,
+                          compute_metrics, max_drawdown,
                           simple_return, twr_series, window_start, xirr)
 from .portfolio import Position
 
@@ -867,8 +868,26 @@ def render_kpis(_status, period):
     twr_net = (abs_pnl_net / (metrics["start_value"] + max(
         metrics["net_external_flow"], 0))) if metrics else float("nan")
 
-    realized_total_gross = sum(r.realized_pnl for r in state.portfolio.realized)
+    # Realized = everything already banked: closed trades (FIFO, fees
+    # included) + dividends (gross) + interest − account fees on
+    # deposits/withdrawals. Net subtracts all tax paid (sells, dividend
+    # withholding) less refunds. Together with unrealized P&L this adds
+    # up to the MAX P&L of the value panel.
+    trades_pnl = sum(r.realized_pnl for r in state.portfolio.realized)
+    dists = state.portfolio.distributions
+    dividends_gross = float(dists["amount"].sum()) if not dists.empty else 0.0
+    interest = state.portfolio.interest_total
+    raw = state.tx.raw
+    account_fees = float(raw.loc[(raw["assetType"] == "Cash")
+                                 & raw["type"].isin(EXTERNAL_CASH_TYPES),
+                                 "fee"].fillna(0).sum())
+    realized_total_gross = (trades_pnl + dividends_gross + interest
+                            - account_fees)
     realized_total_net = realized_total_gross - float(panel.tax_paid.sum())
+    realized_breakdown = (
+        f"Trades {fmt_eur(trades_pnl, 2)} · dividends "
+        f"{fmt_eur(dividends_gross, 2)} · interest {fmt_eur(interest, 2)}"
+        f" · fees {fmt_eur(-account_fees, 2)}")
 
     # Unrealized P&L across all currently open positions (live mid - avg cost).
     unrealized_total = 0.0
@@ -927,7 +946,7 @@ def render_kpis(_status, period):
                           className="muted"),
             ])),
         kpi("Realized P&L (lifetime)",
-            html.Span([
+            html.Span(title=realized_breakdown, children=[
                 html.Span(fmt_eur(realized_total_gross, 2),
                           className=color_class(realized_total_gross)),
                 html.Span("  gross", className="muted",
@@ -1442,6 +1461,9 @@ _TYPE_ABBREVIATIONS = {
     "Buy": "Buy",
     "Sell": "Sell",
     "Taxes": "Tax",
+    "Knock-out": "Knock-out",
+    "Transfer out": "Transfer out",
+    "Tax refund": "Tax refund",
 }
 
 
@@ -2240,13 +2262,11 @@ def render_allocation(_status):
                  style={"flex": "1", "minWidth": "260px"}),
     ]
 
-    # When the Scalable CLI is connected, use its richer pre-computed
-    # breakdowns (product type, equity sector, asset class, region)
-    # instead of our ISIN-prefix country guess. Same pies fall back to
-    # the country-guess region pie otherwise.
+    # When the Scalable CLI is connected, add its product-type split
+    # (stocks / ETFs / derivatives) next to the ISIN-prefix region pie.
     api_breakdowns = _scalable_api.allocation_breakdowns()
     if api_breakdowns:
-        for key in ("PRODUCT_TYPE", "ASSET_CLASS", "EQUITY_SECTOR", "REGION"):
+        for key in ("PRODUCT_TYPE",):
             rows_api = api_breakdowns.get(key)
             if not rows_api:
                 continue
@@ -2278,11 +2298,9 @@ def render_allocation(_status):
             pies.append(html.Div(
                 dcc.Graph(figure=pie, config={"displayModeBar": False}),
                 style={"flex": "1", "minWidth": "260px"}))
-    else:
-        # API not available — keep the country-guess region pie.
-        pies.append(html.Div(
-            dcc.Graph(figure=pie_region, config={"displayModeBar": False}),
-            style={"flex": "1", "minWidth": "260px"}))
+    pies.append(html.Div(
+        dcc.Graph(figure=pie_region, config={"displayModeBar": False}),
+        style={"flex": "1", "minWidth": "260px"}))
 
     return html.Div(pies, style={"display": "flex", "gap": "20px",
                                   "flexWrap": "wrap"})

@@ -15,7 +15,9 @@ import pandas as pd
 
 from .benchmark import BENCHMARK_ISIN, BENCHMARK_NAME, fetch_benchmark_prices
 from .data_loader import (load_transactions, isin_descriptions,
-                          augment_with_api_transactions, LoadedTransactions)
+                          augment_with_api_transactions, LoadedTransactions,
+                          normalize_derivative_knockouts,
+                          collapse_transfer_round_trips)
 from .gettex_history import fetch_gettex_history
 from .historical_prices import get_all_prices
 from .performance import build_value_panel, effective_today, ValuePanel
@@ -78,6 +80,15 @@ def load_state(force: bool = False) -> DashboardState:
                     tx, api_added = augment_with_api_transactions(tx, items)
             except Exception as e:
                 print(f"[api sync] skipped — {e}")
+
+        tx, n_round_trips = collapse_transfer_round_trips(tx)
+        if n_round_trips:
+            print(f"[transfers] {n_round_trips} out/in round trips collapsed "
+                  f"(cost basis preserved)")
+        tx, n_knockouts = normalize_derivative_knockouts(tx)
+        if n_knockouts:
+            print(f"[knock-outs] {n_knockouts} derivative write-offs "
+                  f"normalised (tax refunds split from distributions)")
 
         portfolio = build_portfolio(tx.raw)
         descriptions = isin_descriptions(tx.raw)

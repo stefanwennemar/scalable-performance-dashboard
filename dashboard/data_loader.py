@@ -137,10 +137,49 @@ def _utc_str_to_berlin_naive(utc_str: str) -> pd.Timestamp:
     return ts.tz_convert(BERLIN_TZ).tz_localize(None)
 
 
-def _api_item_to_csv_row(item: dict, csv_type: str) -> dict | None:
+def _num(v) -> float | None:
+    return float(v) if v not in (None, "") else None
+
+
+def _trade_from_details(detail: dict | None, summary_amount: float
+                        ) -> tuple[float, float, float, float] | None:
+    """``(amount, price, fee, tax)`` in CSV convention from a
+    ``security_trade`` details payload, or ``None`` if unusable.
+
+    CSV convention: ``amount`` is the gross market value (negative for
+    buys), fee and tax are separate positive numbers. The result is only
+    accepted if it reproduces the summary's net cash amount.
+    """
+    trade = (detail or {}).get("security_trade") or {}
+    tta = trade.get("trade_transaction_amounts") or {}
+    gross = _num(tta.get("market_valuation"))
+    price = _num(trade.get("average_price"))
+    if gross is None or price is None:
+        return None
+    fee = sum(_num(tta.get(k)) or 0.0 for k in
+              ("transaction_fee", "venue_fee", "crypto_spread_fee"))
+    tax = _num(tta.get("tax_amount")) or 0.0
+    if summary_amount < 0:
+        # Buy side: fold any transaction tax (e.g. French FTT) into the
+        # fee so it lands in the lot's cost basis and in cash.
+        amount, fee, tax = -gross, fee + tax, 0.0
+    else:
+        amount = gross
+    if abs((amount - fee - tax) - summary_amount) > 0.015:
+        return None
+    return amount, price, fee, tax
+
+
+def _api_item_to_csv_row(item: dict, csv_type: str,
+                         detail: dict | None = None) -> dict | None:
     """Translate one API transaction record into the CSV-shape row used by
-    ``load_transactions``. Returns ``None`` for unmapped items."""
-    is_security = item.get("type") == "SECURITY_TRANSACTION"
+    ``load_transactions``. Returns ``None`` for unmapped items.
+
+    ``detail`` is the optional ``sc broker transaction details`` payload;
+    it supplies the fee/tax split the summary record lacks."""
+    api_type = item.get("type")
+    is_security = api_type in ("SECURITY_TRANSACTION",
+                               "NON_TRADE_SECURITY_TRANSACTION")
     when_utc = item.get("last_event_datetime")
     if not when_utc:
         return None
@@ -149,19 +188,33 @@ def _api_item_to_csv_row(item: dict, csv_type: str) -> dict | None:
     quantity = item.get("quantity")
     isin = item.get("isin") if is_security else item.get("related_isin")
     description = item.get("description") or ""
+    fee = 0.0
+    tax = 0.0
 
     if is_security:
         shares = float(quantity) if quantity not in (None, "") else float("nan")
-        # API summary doesn't expose fee/tax — leave as 0 so the FIFO
-        # engine doesn't double-deduct anything we already have in CSV.
+        # Fallback when no details are available: the summary amount is
+        # net cash (fees and tax already deducted), so treat it as the
+        # gross with zero fee/tax. Cash stays right; P&L is off by tax.
         price = (abs(float(amount)) / shares
                  if amount not in (None, "") and shares else float("nan"))
-        # CSV sign convention: Buy/Savings plan/Reinvestment_Distribution
-        # have negative cash impact; Sell positive. API already follows
-        # that, so we don't flip signs.
+        if api_type == "NON_TRADE_SECURITY_TRANSACTION":
+            nt_type = (item.get("non_trade_security_transaction_type")
+                       or "").upper()
+            if nt_type.endswith("_OUT"):
+                shares = -abs(shares)
+        elif amount not in (None, ""):
+            parsed = _trade_from_details(detail, float(amount))
+            if parsed is not None:
+                amount, price, fee, tax = parsed
     else:
         shares = float("nan")
         price = float("nan")
+        # CSV Distribution rows carry the net cash in ``amount`` and the
+        # withheld tax (negative = refund) in ``tax``; mirror that.
+        tax_details = ((detail or {}).get("cash") or {}).get("tax_details")
+        if tax_details and tax_details.get("tax_amount") is not None:
+            tax = float(tax_details["tax_amount"])
 
     return {
         "date": when_berlin.strftime("%Y-%m-%d"),
@@ -175,8 +228,8 @@ def _api_item_to_csv_row(item: dict, csv_type: str) -> dict | None:
         "shares": shares,
         "price": price,
         "amount": float(amount) if amount not in (None, "") else float("nan"),
-        "fee": 0.0,
-        "tax": 0.0,
+        "fee": fee,
+        "tax": tax,
         "currency": item.get("currency") or "EUR",
         "datetime": when_berlin,
     }
@@ -219,7 +272,7 @@ def augment_with_api_transactions(tx: LoadedTransactions,
                pd.Timestamp(r.datetime).floor("s"))
         csv_keys.add(key)
 
-    new_rows: list[dict] = []
+    candidates: list[tuple[dict, str]] = []
     for item in api_items:
         when_utc = item.get("last_event_datetime")
         if not when_utc:
@@ -230,7 +283,17 @@ def augment_with_api_transactions(tx: LoadedTransactions,
         csv_type = scalable_api._csv_type(item)
         if csv_type is None:
             continue
-        row = _api_item_to_csv_row(item, csv_type)
+        candidates.append((item, csv_type))
+
+    details = scalable_api.transaction_details([
+        item["id"] for item, csv_type in candidates
+        if item.get("id") and (item.get("type") == "SECURITY_TRANSACTION"
+                               or csv_type == "Distribution")
+    ])
+
+    new_rows: list[dict] = []
+    for item, csv_type in candidates:
+        row = _api_item_to_csv_row(item, csv_type, details.get(item.get("id")))
         if row is None:
             continue
         # Second-pass dedup by event identity.
@@ -263,3 +326,155 @@ def augment_with_api_transactions(tx: LoadedTransactions,
     cash = combined[combined["assetType"] == "Cash"].copy()
     new_tx = replace(tx, raw=combined, securities=securities, cash=cash)
     return new_tx, len(new_rows)
+
+
+# ---------------------------------------------------------------------------
+# Derivative knock-outs
+# ---------------------------------------------------------------------------
+
+# Leveraged products (turbos, warrants, factor certificates) never pay
+# dividends. When one is knocked out, Scalable books two things:
+#   1. a write-off of the remaining shares at €0.001 each (CSV: negative
+#      "Corporate action"; API: SWAP_OUT) — sometimes missing entirely, and
+#   2. a cash "Distribution" on the derivative's ISIN holding the €0.001
+#      proceeds plus the tax refund triggered by the realised loss.
+# Left as-is, the loss never gets realised (ghost open position) and the
+# refund shows up as dividend income.
+_DERIVATIVE_RE = re.compile(
+    r"turbo|optionsschein|knock|faktor|mini[ -]?future|warrant", re.I)
+KNOCKOUT_PRICE = 0.001
+_EPS = 1e-9
+
+
+def _is_derivative(description) -> bool:
+    return isinstance(description, str) and bool(
+        _DERIVATIVE_RE.search(description))
+
+
+def normalize_derivative_knockouts(tx: LoadedTransactions
+                                   ) -> tuple[LoadedTransactions, int]:
+    """Rewrite knock-out events on derivative ISINs. Returns
+    ``(new_tx, n_knockouts)``.
+
+    - Negative-share "Corporate action" rows become ``Knock-out`` sells.
+    - Each "Distribution" becomes a ``Knock-out`` cash row (the €0.001/share
+      proceeds) plus a ``Tax refund`` cash row (the rest). If no write-off
+      row preceded it, one is synthesised for the shares still open.
+    - A write-off arriving after its refund is clipped to the shares still
+      open, so it can't double-count.
+    """
+    raw = tx.raw.copy()
+    deriv_isins = set(raw.loc[raw["description"].map(_is_derivative),
+                              "isin"].dropna())
+    if not deriv_isins:
+        return tx, 0
+
+    # Security rows sort before cash rows at equal timestamps, so a
+    # same-day write-off is seen before its refund.
+    ordered = raw.assign(_cash=(raw["assetType"] == "Cash").astype(int)) \
+        .sort_values(["datetime", "_cash"], kind="stable")
+
+    drop: list = []
+    extra: list[dict] = []
+    running: dict[str, float] = {}
+    n_knockouts = 0
+    for idx, r in ordered.iterrows():
+        isin = r["isin"]
+        if pd.isna(isin) or isin not in deriv_isins:
+            continue
+        shares = r["shares"] if pd.notna(r["shares"]) else 0.0
+        held = running.get(isin, 0.0)
+
+        if r["assetType"] == "Security":
+            if r["type"] in SECURITY_BUY_TYPES:
+                running[isin] = held + shares
+            elif r["type"] in SECURITY_SELL_TYPES:
+                running[isin] = held - shares
+            elif r["type"] == "Corporate action" and shares < -_EPS:
+                qty = min(-shares, max(held, 0.0))
+                if qty <= _EPS:
+                    drop.append(idx)       # already written off
+                    continue
+                raw.loc[idx, "type"] = "Knock-out"
+                raw.loc[idx, "shares"] = -qty
+                running[isin] = held - qty
+            elif r["type"] in ("Corporate action", "Security transfer"):
+                running[isin] = held + shares
+            continue
+
+        if r["type"] != "Distribution":
+            continue
+        amount = r["amount"] if pd.notna(r["amount"]) else 0.0
+        tax = r["tax"] if pd.notna(r["tax"]) else 0.0
+        open_qty = max(held, 0.0)
+        if tax:
+            proceeds = amount + tax       # tax is negative for a refund
+        else:
+            proceeds = min(amount, round(open_qty * KNOCKOUT_PRICE, 2))
+        refund = amount - proceeds
+
+        if open_qty > _EPS:
+            extra.append({**r.drop("_cash").to_dict(),
+                          "assetType": "Security", "type": "Knock-out",
+                          "shares": -open_qty,
+                          "price": (proceeds / open_qty if proceeds > 0
+                                    else KNOCKOUT_PRICE),
+                          "amount": -proceeds, "fee": 0.0, "tax": 0.0})
+            running[isin] = 0.0
+        n_knockouts += 1
+
+        base = {**r.drop("_cash").to_dict(), "fee": 0.0, "tax": 0.0}
+        drop.append(idx)
+        if abs(proceeds) > _EPS:
+            extra.append({**base, "type": "Knock-out", "amount": proceeds})
+        if abs(refund) > _EPS:
+            extra.append({**base, "type": "Tax refund", "amount": refund})
+
+    raw = raw.drop(index=drop)
+    if extra:
+        raw = pd.concat([raw, pd.DataFrame(extra)[raw.columns]],
+                        ignore_index=True)
+    raw = raw.sort_values("datetime", kind="stable").reset_index(drop=True)
+    return replace(tx, raw=raw,
+                   securities=raw[raw["assetType"] == "Security"].copy(),
+                   cash=raw[raw["assetType"] == "Cash"].copy()), n_knockouts
+
+
+# ---------------------------------------------------------------------------
+# Security-transfer round trips
+# ---------------------------------------------------------------------------
+
+def collapse_transfer_round_trips(tx: LoadedTransactions, max_days: int = 7
+                                  ) -> tuple[LoadedTransactions, int]:
+    """Drop "Security transfer" out/in pairs of the same ISIN and share
+    count within ``max_days`` (e.g. a depot migration on 2025-12-05/06).
+
+    Replayed literally, the out-leg discards the FIFO lots and the in-leg
+    re-opens them at the transfer-day price, so every gain up to the
+    transfer vanishes from realized *and* unrealized P&L. Returns
+    ``(new_tx, n_pairs)``.
+    """
+    raw = tx.raw
+    xfers = raw[raw["type"] == "Security transfer"].sort_values("datetime")
+    outs = xfers[xfers["shares"] < 0]
+    ins = xfers[xfers["shares"] > 0]
+    used: set = set()
+    drop: list = []
+    for o_idx, o in outs.iterrows():
+        cand = ins[(ins["isin"] == o["isin"])
+                   & ((ins["shares"] + o["shares"]).abs() < 1e-6)
+                   & (ins["datetime"] >= o["datetime"])
+                   & (ins["datetime"] - o["datetime"]
+                      <= pd.Timedelta(days=max_days))
+                   & ~ins.index.isin(list(used))]
+        if cand.empty:
+            continue
+        i_idx = cand.index[0]
+        used.add(i_idx)
+        drop += [o_idx, i_idx]
+    if not drop:
+        return tx, 0
+    raw = raw.drop(index=drop).reset_index(drop=True)
+    return replace(tx, raw=raw,
+                   securities=raw[raw["assetType"] == "Security"].copy(),
+                   cash=raw[raw["assetType"] == "Cash"].copy()), len(drop) // 2
