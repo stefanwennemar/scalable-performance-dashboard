@@ -27,6 +27,7 @@ dashboard/
     prices.py            gettex.de live bid/ask via Playwright
     historical_prices.py yfinance daily closes, ISIN→ticker, FX
     performance.py       Daily value panel, TWR, simple return, XIRR, risk
+    derivatives.py       Derivatives sleeve: € mark-to-market P&L, tax, fees
     state.py             Process-wide state cache (thread-safe lazy loads)
     app.py               Dash UI + callbacks
 assets/styles.css        Scalable-style dark theme (emerald accent #28EBCF)

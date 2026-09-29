@@ -17,6 +17,7 @@ from .benchmark import BENCHMARK_NAME, compute_market_metrics
 from .performance import (EXTERNAL_CASH_TYPES, annualised_return,
                           compute_metrics, max_drawdown,
                           simple_return, twr_series, window_start, xirr)
+from .derivatives import DerivativeSleeve, build_sleeve
 from .portfolio import Position
 
 PERIODS = ["1D", "1W", "1M", "3M", "YTD", "1Y", "3Y", "MAX"]
@@ -361,6 +362,68 @@ def allocation_tab() -> html.Div:
     ])
 
 
+def derivatives_tab() -> html.Div:
+    return html.Div([
+        html.Div(id="deriv-kpis", className="kpi-row"),
+
+        html.Div([
+            html.H3("Derivatives P&L", className="card-title"),
+            html.P("Cumulative euro P&L on turbos, warrants and factor "
+                   "certificates, marked to market daily (open positions at "
+                   "their daily price), gross of tax. The sleeve holds no "
+                   "cash of its own, so returns are shown in euros rather "
+                   "than as a time-weighted percentage.",
+                   className="card-subtitle"),
+            html.Div([
+                html.Button(p, id={"type": "deriv-period-btn", "period": p},
+                            className="period-btn"
+                            + (" active" if p == DEFAULT_PERIOD else ""),
+                            n_clicks=0)
+                for p in PERIODS
+            ], className="period-switch", style={"marginBottom": "12px"}),
+            dcc.Loading(
+                dcc.Graph(id="deriv-pnl-chart",
+                          config={"displayModeBar": False}),
+                type="circle", color=COLOR_GREEN,
+            ),
+        ], className="card"),
+
+        html.Div([
+            html.H3("Period P&L", className="card-title"),
+            html.Div([
+                html.Button("Weekly",
+                            id={"type": "deriv-gran-btn", "gran": "W"},
+                            className="period-btn active", n_clicks=0),
+                html.Button("Monthly",
+                            id={"type": "deriv-gran-btn", "gran": "M"},
+                            className="period-btn", n_clicks=0),
+            ], className="period-switch", style={"marginBottom": "12px"}),
+            dcc.Loading(
+                dcc.Graph(id="deriv-bars-chart",
+                          config={"displayModeBar": False}),
+                type="circle", color=COLOR_GREEN,
+            ),
+        ], className="card"),
+
+        html.Div([
+            html.H3("Trading metrics", className="card-title"),
+            html.P("Computed over trades closed in the selected period.",
+                   className="card-subtitle"),
+            html.Div(id="deriv-metrics"),
+        ], className="card"),
+
+        html.Div([
+            html.H3("Open derivative positions", className="card-title"),
+            html.Div(id="deriv-open"),
+        ], className="card"),
+
+        html.Div([
+            html.H3("Derivative trades", className="card-title"),
+            html.Div(id="deriv-table"),
+        ], className="card"),
+    ])
+
+
 app.layout = html.Div([
     dcc.Store(id="active-period", data=DEFAULT_PERIOD),
     dcc.Store(id="return-mode", data="twr"),
@@ -369,6 +432,7 @@ app.layout = html.Div([
     dcc.Store(id="ret-granularity", data="M"),
     dcc.Store(id="ret-mode", data="pct"),
     dcc.Store(id="ret-benchmark-on", data=False),
+    dcc.Store(id="deriv-granularity", data="W"),
     dcc.Store(id="api-modal-open", data=False),
     dcc.Store(id="api-login-url", data=None),
     # Polls the API status every 4 s while the connect modal is open so
@@ -434,6 +498,9 @@ app.layout = html.Div([
                 children=best_worst_tab()),
         dcc.Tab(label="Allocation", value="allocation", className="dash-tab",
                 selected_className="dash-tab--selected", children=allocation_tab()),
+        dcc.Tab(label="Derivatives", value="derivatives",
+                className="dash-tab", selected_className="dash-tab--selected",
+                children=derivatives_tab()),
     ]),
 ], className="app-shell")
 
@@ -446,13 +513,15 @@ app.layout = html.Div([
     Output("active-period", "data"),
     Input({"type": "period-btn", "period": dash.ALL}, "n_clicks"),
     Input({"type": "ret-period-btn", "period": dash.ALL}, "n_clicks"),
+    Input({"type": "deriv-period-btn", "period": dash.ALL}, "n_clicks"),
     State("active-period", "data"),
 )
-def update_active_period(_ov_clicks, _ret_clicks, current):
-    """Either tab's period buttons write to the same shared store, so the
-    active window stays consistent across the Overview and Returns tabs."""
+def update_active_period(_ov_clicks, _ret_clicks, _deriv_clicks, current):
+    """Every tab's period buttons write to the same shared store, so the
+    active window stays consistent across Overview, Returns, Derivatives."""
     ctx = callback_context
-    if not ctx.triggered or not (any(_ov_clicks) or any(_ret_clicks)):
+    if not ctx.triggered or not (any(_ov_clicks) or any(_ret_clicks)
+                                 or any(_deriv_clicks)):
         return current or DEFAULT_PERIOD
     import json
     trig = ctx.triggered[0]["prop_id"].split(".")[0]
@@ -462,13 +531,14 @@ def update_active_period(_ov_clicks, _ret_clicks, current):
 @app.callback(
     Output({"type": "period-btn", "period": dash.ALL}, "className"),
     Output({"type": "ret-period-btn", "period": dash.ALL}, "className"),
+    Output({"type": "deriv-period-btn", "period": dash.ALL}, "className"),
     Input("active-period", "data"),
 )
 def sync_period_button_classes(period):
-    """Highlight the active period button on *both* tabs."""
+    """Highlight the active period button on every tab."""
     classes = ["period-btn" + (" active" if p == period else "")
                for p in PERIODS]
-    return classes, classes
+    return classes, classes, classes
 
 
 @app.callback(
@@ -2805,6 +2875,356 @@ def render_ret_stats(gran, mode, period, _status):
         for label, value, cls in cells
     ], style={"display": "grid",
               "gridTemplateColumns": "repeat(4, 1fr)", "gap": "12px"})
+
+
+# ---------------------------------------------------------------------------
+# Derivatives tab
+# ---------------------------------------------------------------------------
+
+_sleeve_cache: tuple[tuple[int, int], DerivativeSleeve] | None = None
+
+
+def _get_sleeve():
+    """(sleeve, panel, state), rebuilt only when the panel or state changes."""
+    global _sleeve_cache
+    panel = ds.get_value_panel()
+    state = ds.load_state()
+    key = (id(panel), id(state))
+    if _sleeve_cache is None or _sleeve_cache[0] != key:
+        _sleeve_cache = (key, build_sleeve(state.tx.raw, state.portfolio,
+                                           panel))
+    return _sleeve_cache[1], panel, state
+
+
+def _deriv_window(sleeve: DerivativeSleeve, panel, period: str):
+    """Window start plus the sleeve's P&L series re-anchored so the day
+    before the window is 0."""
+    ref = panel.dates[-1]
+    start = max(window_start(ref, period or DEFAULT_PERIOD,
+                             absolute_start=panel.dates[0]), panel.dates[0])
+    mask = panel.dates >= start
+
+    def anchored(series: pd.Series) -> pd.Series:
+        before = series[~mask]
+        base = float(before.iloc[-1]) if len(before) else 0.0
+        return series[mask] - base
+
+    return start, anchored(sleeve.pnl), anchored(sleeve.realized_pnl)
+
+
+def _deriv_trades_in_window(sleeve: DerivativeSleeve, start) -> pd.DataFrame:
+    r = sleeve.realized
+    if r.empty:
+        return r
+    return r[r["sell_datetime"] >= start]
+
+
+def _deriv_open_positions(sleeve: DerivativeSleeve, state) -> list[dict]:
+    rows = []
+    for isin, pos in state.portfolio.positions.items():
+        if isin not in sleeve.isins:
+            continue
+        lp = state.live_prices.get(isin)
+        mid = lp.mid if (lp and lp.mid is not None) else None
+        value = mid * pos.shares if mid is not None else None
+        unreal = value - pos.cost_basis if value is not None else None
+        rows.append({
+            "description": pos.description or isin, "isin": isin,
+            "shares": pos.shares, "avg_cost": pos.avg_cost, "mid": mid,
+            "value": value, "unrealized": unreal,
+            "unrealized_pct": (unreal / pos.cost_basis * 100
+                               if unreal is not None and pos.cost_basis
+                               else None),
+            "cost_basis": pos.cost_basis,
+        })
+    return rows
+
+
+def _chart_layout(fig: go.Figure, y_axis: dict, show_legend: bool,
+                  hover_x: str = "%d %b %Y") -> go.Figure:
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=_CHART_FONT,
+        margin=dict(l=64, r=20, t=10, b=44),
+        height=380,
+        transition=dict(duration=180, easing="linear"),
+        xaxis=dict(showgrid=False, zeroline=False, color=COLOR_GREY,
+                   hoverformat=hover_x, automargin=True,
+                   tickfont=_CHART_FONT),
+        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
+                   zeroline=True, zerolinecolor="rgba(255,255,255,0.15)",
+                   color=COLOR_GREY, automargin=True,
+                   tickfont=_CHART_FONT, **y_axis),
+        showlegend=show_legend,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, bgcolor="rgba(0,0,0,0)",
+                    font=dict(family=_CHART_FONT["family"],
+                              color=COLOR_GREY, size=11)),
+        hovermode="x unified",
+        hoverlabel=_HOVER_LABEL,
+    )
+    return fig
+
+
+@app.callback(
+    Output("deriv-granularity", "data"),
+    Output({"type": "deriv-gran-btn", "gran": dash.ALL}, "className"),
+    Input({"type": "deriv-gran-btn", "gran": dash.ALL}, "n_clicks"),
+    State("deriv-granularity", "data"),
+)
+def update_deriv_gran(_clicks, current):
+    ctx = callback_context
+    grans = ["W", "M"]
+    if not ctx.triggered or not any(_clicks):
+        g = current or "W"
+    else:
+        import json
+        trig = ctx.triggered[0]["prop_id"].split(".")[0]
+        g = json.loads(trig)["gran"]
+    return g, ["period-btn" + (" active" if x == g else "") for x in grans]
+
+
+@app.callback(
+    Output("deriv-kpis", "children"),
+    Input("active-period", "data"),
+    Input("prices-status", "children"),
+)
+def render_deriv_kpis(period, _status):
+    sleeve, panel, state = _get_sleeve()
+    start, pnl, _realized = _deriv_window(sleeve, panel, period)
+    trades = _deriv_trades_in_window(sleeve, start)
+    in_window = panel.dates >= start
+    tax = float(sleeve.tax[in_window].sum())
+    pnl_total = float(pnl.iloc[-1]) if len(pnl) else 0.0
+
+    realized = float(trades["realized_pnl"].sum()) if not trades.empty else 0.0
+    wins = trades[trades["realized_pnl"] > 0] if not trades.empty else trades
+    losses = trades[trades["realized_pnl"] < 0] if not trades.empty else trades
+    n = len(trades)
+    win_rate = len(wins) / n if n else float("nan")
+    gross_win = float(wins["realized_pnl"].sum()) if n else 0.0
+    gross_loss = -float(losses["realized_pnl"].sum()) if n else 0.0
+    profit_factor = gross_win / gross_loss if gross_loss > 0 else float("nan")
+    avg_win = gross_win / len(wins) if n and len(wins) else float("nan")
+    avg_loss = -gross_loss / len(losses) if n and len(losses) else float("nan")
+    kos = trades[trades["sell_type"] == "Knock-out"] if n else trades
+    ko_loss = float(kos["realized_pnl"].sum()) if n else 0.0
+
+    open_rows = _deriv_open_positions(sleeve, state)
+    unreal = sum(r["unrealized"] or 0.0 for r in open_rows)
+    open_cost = sum(r["cost_basis"] for r in open_rows)
+
+    def kpi(label, value_html, sub_html=""):
+        return html.Div([
+            html.Div(label, className="kpi-label"),
+            html.Div(value_html, className="kpi-value"),
+            html.Div(sub_html, className="kpi-delta"),
+        ], className="kpi-card")
+
+    def eur(v):
+        return html.Span(fmt_eur(v, 2), className=color_class(v))
+
+    return [
+        kpi(f"P&L ({period}) — gross €", eur(pnl_total),
+            html.Span(["Net of tax: ", eur(pnl_total - tax)],
+                      className="muted")),
+        kpi(f"Realized P&L ({period})", eur(realized),
+            html.Span(f"{n} trades closed · tax {fmt_eur(tax, 2)}",
+                      className="muted")),
+        kpi("Unrealized P&L (open)", eur(unreal),
+            html.Span(f"{len(open_rows)} open · €{open_cost:,.0f} cost basis",
+                      className="muted")),
+        kpi("Win rate",
+            html.Span(f"{win_rate * 100:.1f}%" if n else "—",
+                      className=color_class(win_rate - 0.5) if n else "muted"),
+            html.Span(f"{len(wins)} wins · {len(losses)} losses",
+                      className="muted")),
+        kpi("Profit factor",
+            html.Span(fmt_num(profit_factor, 2),
+                      className=color_class(profit_factor - 1)
+                      if profit_factor == profit_factor else "muted"),
+            html.Span(f"avg win {fmt_eur(avg_win, 2)} · "
+                      f"avg loss {fmt_eur(avg_loss, 2)}", className="muted")),
+        kpi("Knock-outs", str(len(kos)),
+            html.Span(["P&L ", eur(ko_loss)], className="muted")),
+    ]
+
+
+@app.callback(
+    Output("deriv-pnl-chart", "figure"),
+    Input("active-period", "data"),
+    Input("prices-status", "children"),
+)
+def render_deriv_pnl_chart(period, _status):
+    sleeve, panel, _state = _get_sleeve()
+    _start, pnl, realized = _deriv_window(sleeve, panel, period)
+    if pnl.empty:
+        return go.Figure()
+    pnl = pnl.round(2)
+    last = float(pnl.iloc[-1])
+    color = COLOR_GREEN if last >= 0 else COLOR_RED
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=pnl.index, y=pnl.values, mode="lines", name="Total (marked to market)",
+        line=dict(color=color, width=2),
+        fill="tozeroy",
+        fillcolor=COLOR_GREEN_FILL if last >= 0 else COLOR_RED_FILL,
+        hovertemplate="€%{y:+,.2f}<extra>Total</extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=realized.index, y=realized.round(2).values, mode="lines",
+        name="Realized", line=dict(color=BENCH_COLOR, width=1.5, shape="hv",
+                                   dash="dot"),
+        hovertemplate="€%{y:+,.2f}<extra>Realized</extra>",
+    ))
+    return _chart_layout(fig, dict(tickprefix="€", tickformat=",.0f"), True)
+
+
+@app.callback(
+    Output("deriv-bars-chart", "figure"),
+    Input("deriv-granularity", "data"),
+    Input("active-period", "data"),
+    Input("prices-status", "children"),
+)
+def render_deriv_bars(gran, period, _status):
+    sleeve, panel, _state = _get_sleeve()
+    _start, pnl, _realized = _deriv_window(sleeve, panel, period)
+    if pnl.empty:
+        return go.Figure()
+    gran = gran or "W"
+    daily = pnl.diff()
+    daily.iloc[0] = pnl.iloc[0]
+    bars = daily.resample(_RESAMPLE_MAP[gran]).sum().round(2)
+    fig = go.Figure(go.Bar(
+        x=bars.index, y=bars.values, marker_line_width=0,
+        marker_color=[COLOR_GREEN if v >= 0 else COLOR_RED
+                      for v in bars.values],
+        hovertemplate="€%{y:+,.2f}<extra>P&L</extra>",
+    ))
+    fig = _chart_layout(fig, dict(tickprefix="€", tickformat=",.0f"), False,
+                        hover_x="%b %Y" if gran == "M" else "Week of %d %b %Y")
+    fig.update_layout(bargap=0.1)
+    return fig
+
+
+@app.callback(
+    Output("deriv-metrics", "children"),
+    Input("active-period", "data"),
+    Input("prices-status", "children"),
+)
+def render_deriv_metrics(period, _status):
+    sleeve, panel, _state = _get_sleeve()
+    start, pnl, _realized = _deriv_window(sleeve, panel, period)
+    trades = _deriv_trades_in_window(sleeve, start)
+    if trades.empty:
+        return html.Div("No derivative trades closed in this period.",
+                        className="muted")
+    in_window = panel.dates >= start
+    trades = trades.sort_values("sell_datetime")
+    pnl_t = trades["realized_pnl"]
+    wins, losses = pnl_t[pnl_t > 0], pnl_t[pnl_t < 0]
+    cost_closed = float(trades["cost_basis"].sum())
+    ko = trades[trades["sell_type"] == "Knock-out"]
+    drawdown = float((pnl - pnl.cummax()).min()) if len(pnl) else 0.0
+    best = trades.loc[pnl_t.idxmax()]
+    worst = trades.loc[pnl_t.idxmin()]
+
+    def short(desc):
+        return (desc or "")[:28]
+
+    cells = [
+        ("Trades closed", f"{len(trades)}", "muted"),
+        ("Capital deployed (buys)",
+         fmt_eur(float(sleeve.invested[in_window].sum()), 0), "muted"),
+        ("Return on capital (closed)",
+         fmt_pct(float(pnl_t.sum()) / cost_closed if cost_closed else
+                 float("nan")), color_class(float(pnl_t.sum()))),
+        ("Expectancy / trade", fmt_eur(float(pnl_t.mean()), 2),
+         color_class(float(pnl_t.mean()))),
+        (f"Best trade · {short(best['description'])}",
+         fmt_eur(float(best["realized_pnl"]), 2), "pos"),
+        (f"Worst trade · {short(worst['description'])}",
+         fmt_eur(float(worst["realized_pnl"]), 2), "neg"),
+        ("Average win", fmt_eur(float(wins.mean()) if len(wins) else
+                                float("nan"), 2), "pos"),
+        ("Average loss", fmt_eur(float(losses.mean()) if len(losses) else
+                                 float("nan"), 2), "neg"),
+        ("Median holding (days)",
+         f"{float(trades['holding_days'].median()):.0f}", "muted"),
+        ("Average holding (days)",
+         f"{float(trades['holding_days'].mean()):.1f}", "muted"),
+        ("Longest winning streak", str(_max_streak(pnl_t > 0)), "muted"),
+        ("Longest losing streak", str(_max_streak(pnl_t < 0)), "muted"),
+        ("Max drawdown (€)", fmt_eur(drawdown, 2), "neg"),
+        ("Knock-out rate", f"{len(ko) / len(trades) * 100:.1f}%", "muted"),
+        ("Broker fees", fmt_eur(-float(sleeve.fees[in_window].sum()), 2),
+         "neg"),
+        ("Tax paid (net of refunds)",
+         fmt_eur(float(sleeve.tax[in_window].sum()), 2), "muted"),
+    ]
+    return html.Div([
+        html.Div([
+            html.Div(label, className="kpi-label"),
+            html.Div(value, className="kpi-value " + cls,
+                     style={"fontSize": "17px"}),
+        ], className="kpi-card", style={"padding": "14px 16px"})
+        for label, value, cls in cells
+    ], style={"display": "grid", "gridTemplateColumns": "repeat(4, 1fr)",
+              "gap": "12px"})
+
+
+@app.callback(
+    Output("deriv-open", "children"),
+    Input("prices-status", "children"),
+)
+def render_deriv_open(_status):
+    sleeve, _panel, state = _get_sleeve()
+    rows = _deriv_open_positions(sleeve, state)
+    if not rows:
+        return html.Div("No open derivative positions.", className="muted")
+
+    def eur_or_dash(v):
+        return fmt_eur(v, 2) if v is not None else "—"
+
+    def pnl_cell(v):
+        return (html.Span(fmt_eur(v, 2), className=color_class(v))
+                if v is not None else "—")
+
+    return _df_to_table(pd.DataFrame(rows), [
+        ("Position", "description", None),
+        ("ISIN", "isin", None),
+        ("Shares", "shares", lambda v: f"{v:,.0f}"),
+        ("Avg cost (€)", "avg_cost", lambda v: f"{v:,.4f}"),
+        ("Mid (€)", "mid", lambda v: f"{v:,.4f}" if v is not None else "—"),
+        ("Value (€)", "value", eur_or_dash),
+        ("Unrealized (€)", "unrealized", pnl_cell),
+        ("Unrealized (%)", "unrealized_pct",
+         lambda v: fmt_pct(v / 100) if v is not None else "—"),
+    ])
+
+
+@app.callback(
+    Output("deriv-table", "children"),
+    Input("active-period", "data"),
+    Input("prices-status", "children"),
+)
+def render_deriv_table(period, _status):
+    sleeve, panel, state = _get_sleeve()
+    start, _pnl, _realized = _deriv_window(sleeve, panel, period)
+    start_str = start.strftime("%Y-%m-%d")
+    records = [r for r in _realized_records(state)
+               if r["isin"] in sleeve.isins and r["date"] >= start_str]
+    if not records:
+        return html.Div("No derivative trades closed in this period.",
+                        className="muted")
+    total = sum(r["realized_pnl"] for r in records)
+    return _trades_table(
+        records,
+        [f"{len(records)} trades closed ({period or DEFAULT_PERIOD})"
+         "  ·  realized ",
+         html.Span(fmt_eur(total), className=color_class(total),
+                   style={"fontWeight": "600"})])
 
 
 # ---------------------------------------------------------------------------

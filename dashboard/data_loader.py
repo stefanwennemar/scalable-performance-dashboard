@@ -341,12 +341,13 @@ def augment_with_api_transactions(tx: LoadedTransactions,
 # Left as-is, the loss never gets realised (ghost open position) and the
 # refund shows up as dividend income.
 _DERIVATIVE_RE = re.compile(
-    r"turbo|optionsschein|knock|faktor|mini[ -]?future|warrant", re.I)
+    r"turbo|optionsschein|knock|faktor|\d+x\s+factor|mini[ -]?future|warrant"
+    r"|\b(?:call|put)\b", re.I)
 KNOCKOUT_PRICE = 0.001
 _EPS = 1e-9
 
 
-def _is_derivative(description) -> bool:
+def is_derivative(description) -> bool:
     return isinstance(description, str) and bool(
         _DERIVATIVE_RE.search(description))
 
@@ -364,7 +365,7 @@ def normalize_derivative_knockouts(tx: LoadedTransactions
       open, so it can't double-count.
     """
     raw = tx.raw.copy()
-    deriv_isins = set(raw.loc[raw["description"].map(_is_derivative),
+    deriv_isins = set(raw.loc[raw["description"].map(is_derivative),
                               "isin"].dropna())
     if not deriv_isins:
         return tx, 0
@@ -434,6 +435,15 @@ def normalize_derivative_knockouts(tx: LoadedTransactions
     if extra:
         raw = pd.concat([raw, pd.DataFrame(extra)[raw.columns]],
                         ignore_index=True)
+    # Some old write-offs quote €0.001/share but no cash ever arrived; book
+    # those at zero so realized P&L matches the cash actually received.
+    paid_isins = set(raw.loc[(raw["assetType"] == "Cash")
+                             & raw["type"].isin(["Knock-out",
+                                                 "Corporate action"]),
+                             "isin"].dropna())
+    unpaid = ((raw["assetType"] == "Security") & (raw["type"] == "Knock-out")
+              & ~raw["isin"].isin(paid_isins))
+    raw.loc[unpaid, ["price", "amount"]] = 0.0
     raw = raw.sort_values("datetime", kind="stable").reset_index(drop=True)
     return replace(tx, raw=raw,
                    securities=raw[raw["assetType"] == "Security"].copy(),
